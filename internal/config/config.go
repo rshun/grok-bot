@@ -19,7 +19,9 @@ const (
 // which systemd loads from /etc/grok-tg-bot.env.
 type Config struct {
 	TelegramToken string
-	AllowedUsers  map[string]struct{}
+	DiscordToken  string
+	TelegramUsers map[string]struct{}
+	DiscordUsers  map[string]struct{}
 	DataDir       string
 	DefaultModel  string
 	GrokBin       string
@@ -33,12 +35,25 @@ type Config struct {
 
 func Load() (Config, error) {
 	token := strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
-	if token == "" {
-		return Config{}, fmt.Errorf("TELEGRAM_BOT_TOKEN is required")
+	discordToken := strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN"))
+	discordToken = strings.TrimPrefix(discordToken, "Bot ")
+	if token == "" && discordToken == "" {
+		return Config{}, fmt.Errorf("TELEGRAM_BOT_TOKEN or DISCORD_BOT_TOKEN is required")
 	}
-	allowed, err := parseUsers(os.Getenv("ALLOWED_USER_IDS"))
-	if err != nil {
-		return Config{}, err
+	var allowed map[string]struct{}
+	var discordUsers map[string]struct{}
+	var err error
+	if token != "" {
+		allowed, err = parseUsers(os.Getenv("ALLOWED_USER_IDS"), "ALLOWED_USER_IDS", "Telegram")
+		if err != nil {
+			return Config{}, err
+		}
+	}
+	if discordToken != "" {
+		discordUsers, err = parseUsers(os.Getenv("DISCORD_ALLOWED_USER_IDS"), "DISCORD_ALLOWED_USER_IDS", "Discord")
+		if err != nil {
+			return Config{}, err
+		}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -84,7 +99,9 @@ func Load() (Config, error) {
 	}
 	return Config{
 		TelegramToken: token,
-		AllowedUsers:  allowed,
+		DiscordToken:  discordToken,
+		TelegramUsers: allowed,
+		DiscordUsers:  discordUsers,
 		DataDir:       dataDir,
 		DefaultModel:  model,
 		GrokBin:       bin,
@@ -96,7 +113,7 @@ func Load() (Config, error) {
 	}, nil
 }
 
-func parseUsers(raw string) (map[string]struct{}, error) {
+func parseUsers(raw, envName, platformName string) (map[string]struct{}, error) {
 	out := make(map[string]struct{})
 	for _, part := range strings.Split(raw, ",") {
 		id := strings.TrimSpace(part)
@@ -104,12 +121,12 @@ func parseUsers(raw string) (map[string]struct{}, error) {
 			continue
 		}
 		if !digits(id) {
-			return nil, fmt.Errorf("ALLOWED_USER_IDS contains %q, which is not a numeric Telegram user id", id)
+			return nil, fmt.Errorf("%s contains %q, which is not a numeric %s user id", envName, id, platformName)
 		}
 		out[id] = struct{}{}
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("ALLOWED_USER_IDS is required")
+		return nil, fmt.Errorf("%s is required", envName)
 	}
 	return out, nil
 }

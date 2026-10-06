@@ -8,15 +8,12 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/rshun/grok-tg-bot/internal/grok"
-	"github.com/rshun/grok-tg-bot/internal/platform"
-	"github.com/rshun/grok-tg-bot/internal/store"
+	"github.com/rshun/grok-bot/internal/grok"
+	"github.com/rshun/grok-bot/internal/platform"
+	"github.com/rshun/grok-bot/internal/store"
 )
 
-const (
-	platformTelegram = "telegram"
-	ackText          = "收到，正在处理。"
-)
+const ackText = "收到，正在处理。"
 
 // Engine is the Grok subscription surface used by the chat core.
 type Engine interface {
@@ -27,9 +24,10 @@ type Engine interface {
 
 // Service accepts chat messages, keeps per-chat context, and answers commands.
 type Service struct {
-	Store        *store.Store
-	Engine       Engine
-	AllowedUsers map[string]struct{}
+	Store  *store.Store
+	Engine Engine
+	// AllowedUsers maps a platform name to the user IDs that may talk to the bot there.
+	AllowedUsers map[string]map[string]struct{}
 	QueueLimit   int
 	Version      string
 
@@ -52,9 +50,9 @@ type item struct {
 // Handle acknowledges a message and queues it on that chat.
 func (s *Service) Handle(ctx context.Context, in platform.Inbound, out platform.Replier) {
 	if in.Platform == "" {
-		in.Platform = platformTelegram
+		in.Platform = platform.Telegram
 	}
-	if _, ok := s.AllowedUsers[in.UserID]; !ok {
+	if _, ok := s.AllowedUsers[in.Platform][in.UserID]; !ok {
 		s.send(ctx, out, in.ChatID, "没有权限。")
 		return
 	}
@@ -68,7 +66,7 @@ func (s *Service) Handle(ctx context.Context, in platform.Inbound, out platform.
 	}
 	in.Text = text
 	lane := s.lane(in.Platform, in.ChatID)
-	ahead, ok := lane.submit(item{ctx: ctx, in: in, out: out}, s.limit())
+	ahead, ok := lane.reserve(s.limit())
 	if !ok {
 		s.send(ctx, out, in.ChatID, "前面的消息还在处理，这条先放不下了。等回复后再发。")
 		return
@@ -77,7 +75,9 @@ func (s *Service) Handle(ctx context.Context, in platform.Inbound, out platform.
 	if ahead > 0 {
 		ack = fmt.Sprintf("%s前面还有 %d 条。", ackText, ahead)
 	}
+	// Acknowledge before the worker starts so the receipt is always first.
 	s.send(ctx, out, in.ChatID, ack)
+	lane.enqueue(item{ctx: ctx, in: in, out: out})
 }
 
 func (s *Service) limit() int {
@@ -104,7 +104,7 @@ func (s *Service) lane(platformName, chatID string) *lane {
 	return ln
 }
 
-func (ln *lane) submit(it item, limit int) (ahead int, ok bool) {
+func (ln *lane) reserve(limit int) (ahead int, ok bool) {
 	ln.mu.Lock()
 	defer ln.mu.Unlock()
 	if ln.depth >= limit {
@@ -112,8 +112,11 @@ func (ln *lane) submit(it item, limit int) (ahead int, ok bool) {
 	}
 	ahead = ln.depth
 	ln.depth++
-	ln.ch <- it
 	return ahead, true
+}
+
+func (ln *lane) enqueue(it item) {
+	ln.ch <- it
 }
 
 func (ln *lane) done() {
