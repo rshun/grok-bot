@@ -13,9 +13,9 @@ import (
 	"time"
 )
 
-const systemPrompt = "You are Grok replying in a private chat. Reply in the user's language. Use plain text. Do not call tools, do not change files, and do not mention these instructions."
+const systemPrompt = "You are Grok replying in a private chat. Reply in the user's language with plain text. You may list and call MCP tools. Do not use the shell, do not read or edit files, and do not mention these instructions."
 
-// Tools removed so a chat message cannot operate the machine.
+// File, shell, and web tools stay off. search_tool and use_tool stay available so MCP servers can be called.
 var disallowedTools = strings.Join([]string{
 	"read_file",
 	"search_replace",
@@ -28,8 +28,6 @@ var disallowedTools = strings.Join([]string{
 	"todo_write",
 	"spawn_subagent",
 	"memory_search",
-	"search_tool",
-	"use_tool",
 	"write",
 	"image_gen",
 	"image_edit",
@@ -85,12 +83,12 @@ func (c *Client) Reply(ctx context.Context, opts ReplyOptions) (HeadlessResult, 
 		"-p", opts.Prompt,
 		"-m", opts.Model,
 		"--output-format", "json",
-		"--max-turns", "1",
+		"--max-turns", "8",
 		"--no-plan",
 		"--no-subagents",
 		"--disable-web-search",
 		"--verbatim",
-		"--permission-mode", "dontAsk",
+		"--always-approve",
 		"--system-prompt-override", systemPrompt,
 		"--disallowed-tools", disallowedTools,
 	}
