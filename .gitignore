@@ -1,4 +1,5 @@
 /data/
+/grok-bot
 /grok-tg-bot
 *.env
 !deploy/*.env.example

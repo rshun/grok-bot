@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rshun/grok-tg-bot/internal/grok"
-	"github.com/rshun/grok-tg-bot/internal/platform"
-	"github.com/rshun/grok-tg-bot/internal/store"
+	"github.com/rshun/grok-bot/internal/grok"
+	"github.com/rshun/grok-bot/internal/platform"
+	"github.com/rshun/grok-bot/internal/store"
 )
 
 type fakeEngine struct {
@@ -192,9 +192,31 @@ func testService(t *testing.T) (*Service, *fakeEngine) {
 	t.Cleanup(func() { db.Close() })
 	engine := &fakeEngine{}
 	return &Service{
-		Store:        db,
-		Engine:       engine,
-		AllowedUsers: map[string]struct{}{"1": {}},
-		QueueLimit:   8,
+		Store:  db,
+		Engine: engine,
+		AllowedUsers: map[string]map[string]struct{}{
+			"telegram": {"1": {}},
+		},
+		QueueLimit: 8,
 	}, engine
+}
+
+func TestAllowlistIsPerPlatform(t *testing.T) {
+	svc, _ := testService(t)
+	svc.AllowedUsers["discord"] = map[string]struct{}{"7": {}}
+	rec := &recorder{}
+	svc.Handle(context.Background(), platform.Inbound{
+		Platform: "discord", ChatID: "c", UserID: "1", Text: "hi", TextMessage: true,
+	}, capture{rec})
+	got := rec.wait(t, 1)
+	if got[0] != "没有权限。" {
+		t.Fatalf("%#v", got)
+	}
+	svc.Handle(context.Background(), platform.Inbound{
+		Platform: "discord", ChatID: "c", UserID: "7", Text: "hi", TextMessage: true,
+	}, capture{rec})
+	got = rec.wait(t, 3)
+	if got[1] != ackText || got[2] != "pong" {
+		t.Fatalf("%#v", got)
+	}
 }

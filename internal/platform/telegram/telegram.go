@@ -8,7 +8,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
-	"github.com/rshun/grok-tg-bot/internal/platform"
+	"github.com/rshun/grok-bot/internal/platform"
 )
 
 const chunkLimit = 4000
@@ -52,7 +52,7 @@ func (b *Bot) Run(ctx context.Context, handler func(context.Context, platform.In
 		text := strings.TrimSpace(msg.Text)
 		media := msg.Photo != nil || msg.Voice != nil || msg.Audio != nil || msg.Video != nil || msg.Document != nil || msg.Sticker != nil || msg.VideoNote != nil
 		in := platform.Inbound{
-			Platform:    "telegram",
+			Platform:    platform.Telegram,
 			ChatID:      strconv.FormatInt(msg.Chat.ID, 10),
 			UserID:      strconv.FormatInt(msg.From.ID, 10),
 			Text:        text,
@@ -68,7 +68,7 @@ func (b *Bot) Send(ctx context.Context, chatID, text string) error {
 	if err != nil {
 		return fmt.Errorf("chat id: %w", err)
 	}
-	for _, chunk := range split(text, chunkLimit) {
+	for _, chunk := range platform.Split(text, chunkLimit) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -79,39 +79,4 @@ func (b *Bot) Send(ctx context.Context, chatID, text string) error {
 		}
 	}
 	return nil
-}
-
-func split(text string, limit int) []string {
-	runes := []rune(text)
-	if len(runes) == 0 {
-		return []string{" "}
-	}
-	if limit < 1 {
-		limit = chunkLimit
-	}
-	var parts []string
-	for len(runes) > limit {
-		cut := limit
-		for i := limit; i > limit/2; i-- {
-			if runes[i-1] == '\n' {
-				cut = i - 1
-				break
-			}
-		}
-		if cut < 1 {
-			cut = limit
-		}
-		parts = append(parts, string(runes[:cut]))
-		runes = runes[cut:]
-		for len(runes) > 0 && runes[0] == '\n' {
-			runes = runes[1:]
-		}
-	}
-	if len(runes) > 0 {
-		parts = append(parts, string(runes))
-	}
-	if len(parts) == 0 {
-		return []string{text}
-	}
-	return parts
 }

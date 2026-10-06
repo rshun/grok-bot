@@ -1,5 +1,5 @@
 [Unit]
-Description=Grok Telegram bot
+Description=Grok bot for Telegram and Discord
 After=network-online.target
 Wants=network-online.target
 

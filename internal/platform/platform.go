@@ -2,13 +2,19 @@ package platform
 
 import "context"
 
-// Inbound is one user message from Telegram or, later, Discord.
+const (
+	// Telegram and Discord are the platform names stored with each chat.
+	Telegram = "telegram"
+	Discord  = "discord"
+)
+
+// Inbound is one user message from Telegram or Discord.
 type Inbound struct {
 	Platform string
 	ChatID   string
 	UserID   string
 	Text     string
-	// Text is false for photos, voice notes, and other unsupported payloads.
+	// TextMessage is false for photos, voice notes, and other unsupported payloads.
 	TextMessage bool
 }
 

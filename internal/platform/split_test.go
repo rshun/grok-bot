@@ -1,13 +1,13 @@
-package telegram
+package platform
 
 import "testing"
 
 func TestSplit(t *testing.T) {
-	if got := split("你好", 10); len(got) != 1 || got[0] != "你好" {
+	if got := Split("你好", 10); len(got) != 1 || got[0] != "你好" {
 		t.Fatalf("%#v", got)
 	}
 	text := "aaaa\nbbbb\ncccc"
-	got := split(text, 9)
+	got := Split(text, 9)
 	joined := ""
 	for _, part := range got {
 		if len([]rune(part)) > 9 {
@@ -25,7 +25,7 @@ func TestSplit(t *testing.T) {
 	for i := range long {
 		long[i] = '中'
 	}
-	got = split(string(long), 8)
+	got = Split(string(long), 8)
 	if len(got) != 3 {
 		t.Fatalf("%d parts", len(got))
 	}
