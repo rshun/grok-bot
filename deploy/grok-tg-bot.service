@@ -1,0 +1,16 @@
+[Unit]
+Description=Grok Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The account that has already run `grok login`.
+User=grok
+EnvironmentFile=/etc/grok-tg-bot.env
+ExecStart=/usr/local/bin/grok-tg-bot
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
