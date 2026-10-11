@@ -30,6 +30,14 @@ go test -mod=readonly ./...
 - `/reset` 清空这个聊天的上下文
 - `/help` 查看说明
 
+### 会话恢复时的错误排查
+
+`Session … found locally (originally in …)` 表示 CLI 找到了原会话，不能据此判断上下文失效。bot 优先返回 CLI 的 JSON 错误，并在纯文本错误中跳过这条会话提示；不自动清空或替换现有会话。
+
+如果提示 `unknown model id`，在发生错误的平台发送 `/model` 查看当前模型及 CLI 提供的可用模型，再发送 `/model 可用模型名` 切换。两个平台的模型选择独立保存；切换模型保留上下文。不要先用 `/reset`，它会清空这个聊天的上下文关联。
+
+仍然失败时，在服务器只读检查 `grok --version` 和 `sudo journalctl -u grok-tg-bot -n 60 --no-pager`，分享前隐藏 Token、Session ID 和用户标识。验证时在测试实例恢复已有会话，确认模型错误能正确展示，再切到可用模型连续发送两条消息确认上下文。错误提取回归测试可离线运行 `go test -mod=readonly ./internal/grok`（同时设置 `GOTOOLCHAIN=local`、`GOPROXY=off`）。该修复不改变 CLI 参数、配置、数据库或会话数据；回滚源码时从修改前备份恢复 `internal/grok/client.go` 和本说明，将新增测试文件移到备份目录。服务器回滚仍需先确认，再恢复已备份的程序并重启服务。
+
 目前只处理文字。可以列出并调用已连接的 MCP。不能改这台机器上的文件，也不能执行命令。
 
 ## 配置
