@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -46,8 +47,10 @@ func (f *fakeEngine) Allowance(context.Context) (grok.Allowance, error) {
 }
 
 type recorder struct {
-	mu   sync.Mutex
-	msgs []string
+	mu         sync.Mutex
+	msgs       []string
+	receipts   int
+	receiptErr error
 }
 
 func (r *recorder) Send(context.Context, string, string) error {
@@ -88,14 +91,33 @@ func (c capture) Send(ctx context.Context, chatID, text string) error {
 	return c.rec.sendText(ctx, chatID, text)
 }
 
-func TestAckThenResult(t *testing.T) {
+func (c capture) MarkReceived(context.Context, platform.Inbound) error {
+	c.rec.mu.Lock()
+	defer c.rec.mu.Unlock()
+	c.rec.receipts++
+	return c.rec.receiptErr
+}
+
+func (r *recorder) receiptCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.receipts
+}
+
+func TestReceiptThenResult(t *testing.T) {
 	svc, engine := testService(t)
 	rec := &recorder{}
+	engine.replyFor = func(opts grok.ReplyOptions) (grok.HeadlessResult, error) {
+		if rec.receiptCount() != 1 {
+			return grok.HeadlessResult{}, errors.New("reply started before receipt")
+		}
+		return grok.HeadlessResult{Text: "pong", SessionID: opts.SessionID}, nil
+	}
 	svc.Handle(context.Background(), platform.Inbound{
 		Platform: "telegram", ChatID: "9", UserID: "1", Text: "hello", TextMessage: true,
 	}, capture{rec})
-	got := rec.wait(t, 2)
-	if got[0] != ackText || got[1] != "pong" {
+	got := rec.wait(t, 1)
+	if len(got) != 1 || got[0] != "pong" {
 		t.Fatalf("%#v", got)
 	}
 	engine.mu.Lock()
@@ -115,15 +137,14 @@ func TestQueueReportsAhead(t *testing.T) {
 		}, capture{rec})
 	}
 	in("one")
-	rec.wait(t, 1)
 	in("two")
-	got := rec.wait(t, 2)
-	if got[1] != ackText+"前面还有 1 条。" {
+	got := rec.wait(t, 1)
+	if len(got) != 1 || got[0] != "已排队，前面还有 1 条。" || rec.receiptCount() != 2 {
 		t.Fatalf("%#v", got)
 	}
 	close(engine.block)
-	got = rec.wait(t, 4)
-	if got[2] != "pong" || got[3] != "pong" {
+	got = rec.wait(t, 3)
+	if got[1] != "pong" || got[2] != "pong" {
 		t.Fatalf("%#v", got)
 	}
 }
@@ -137,11 +158,11 @@ func TestResetClearsSession(t *testing.T) {
 		}, capture{rec})
 	}
 	send("hello")
-	rec.wait(t, 2)
+	rec.wait(t, 1)
 	send("/reset")
-	rec.wait(t, 4)
+	rec.wait(t, 2)
 	send("again")
-	rec.wait(t, 6)
+	rec.wait(t, 3)
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
 	if len(engine.calls) != 2 || !engine.calls[0].NewSession || !engine.calls[1].NewSession {
@@ -158,15 +179,15 @@ func TestUsageAndModel(t *testing.T) {
 	svc.Handle(context.Background(), platform.Inbound{
 		Platform: "telegram", ChatID: "9", UserID: "1", Text: "/usage", TextMessage: true,
 	}, capture{rec})
-	got := rec.wait(t, 2)
-	if got[1] == "" || !strings.Contains(got[1], "本期剩余：98%") {
+	got := rec.wait(t, 1)
+	if len(got) != 1 || !strings.Contains(got[0], "本期剩余：98%") {
 		t.Fatalf("%#v", got)
 	}
 	svc.Handle(context.Background(), platform.Inbound{
 		Platform: "telegram", ChatID: "9", UserID: "1", Text: "/model grok-4.6", TextMessage: true,
 	}, capture{rec})
-	got = rec.wait(t, 4)
-	if got[3] != "已切换到 grok-4.6。下一条消息开始使用。" {
+	got = rec.wait(t, 2)
+	if len(got) != 2 || got[1] != "已切换到 grok-4.6。下一条消息开始使用。" || rec.receiptCount() != 0 {
 		t.Fatalf("%#v", got)
 	}
 }
@@ -179,6 +200,21 @@ func TestRejectsOtherUsers(t *testing.T) {
 	}, capture{rec})
 	got := rec.wait(t, 1)
 	if got[0] != "没有权限。" {
+		t.Fatalf("%#v", got)
+	}
+	if rec.receiptCount() != 0 {
+		t.Fatal("marked an unauthorized message as received")
+	}
+}
+
+func TestReceiptFailureStillReplies(t *testing.T) {
+	svc, _ := testService(t)
+	rec := &recorder{receiptErr: errors.New("synthetic receipt failure")}
+	svc.Handle(context.Background(), platform.Inbound{
+		Platform: "telegram", ChatID: "9", UserID: "1", Text: "hello", TextMessage: true,
+	}, capture{rec})
+	got := rec.wait(t, 1)
+	if len(got) != 1 || got[0] != "pong" || rec.receiptCount() != 1 {
 		t.Fatalf("%#v", got)
 	}
 }
@@ -215,8 +251,8 @@ func TestAllowlistIsPerPlatform(t *testing.T) {
 	svc.Handle(context.Background(), platform.Inbound{
 		Platform: "discord", ChatID: "c", UserID: "7", Text: "hi", TextMessage: true,
 	}, capture{rec})
-	got = rec.wait(t, 3)
-	if got[1] != ackText || got[2] != "pong" {
+	got = rec.wait(t, 2)
+	if len(got) != 2 || got[1] != "pong" || rec.receiptCount() != 1 {
 		t.Fatalf("%#v", got)
 	}
 }

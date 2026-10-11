@@ -2,6 +2,7 @@ package discord
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 
 	"github.com/bwmarrin/discordgo"
@@ -106,6 +107,14 @@ func (b *Bot) onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate
 		Text:        commandText(i.ApplicationCommandData()),
 		TextMessage: true,
 	}
+	// Discord requires acknowledgement before queued commands start running.
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral},
+	}); err != nil {
+		slog.Warn("discord interaction acknowledgement failed")
+		return
+	}
 	b.handler(b.context(), in, &interactionReply{session: s, interaction: i.Interaction})
 }
 
@@ -133,8 +142,15 @@ func (b *Bot) Send(ctx context.Context, chatID, text string) error {
 	return nil
 }
 
-// interactionReply turns the core's first send into the interaction response
-// and every later send into a follow-up. Discord requires that response.
+func (b *Bot) MarkReceived(ctx context.Context, in platform.Inbound) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return b.session.ChannelTyping(in.ChatID, discordgo.WithContext(ctx))
+}
+
+// interactionReply replaces the deferred response with the first result.
+// Additional chunks are sent as follow-ups.
 type interactionReply struct {
 	session     *discordgo.Session
 	interaction *discordgo.Interaction
@@ -142,16 +158,15 @@ type interactionReply struct {
 }
 
 func (r *interactionReply) Send(ctx context.Context, _, text string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	chunks := platform.Split(text, chunkLimit)
 	if !r.responded {
-		err := r.session.InteractionRespond(r.interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content:         chunks[0],
-				Flags:           discordgo.MessageFlagsSuppressEmbeds,
-				AllowedMentions: nobody(),
-			},
-		})
+		_, err := r.session.InteractionResponseEdit(r.interaction, &discordgo.WebhookEdit{
+			Content:         &chunks[0],
+			AllowedMentions: nobody(),
+		}, discordgo.WithContext(ctx))
 		r.responded = err == nil
 		if err != nil {
 			return err
@@ -164,7 +179,7 @@ func (r *interactionReply) Send(ctx context.Context, _, text string) error {
 		}
 		_, err := r.session.FollowupMessageCreate(r.interaction, true, &discordgo.WebhookParams{
 			Content:         chunk,
-			Flags:           discordgo.MessageFlagsSuppressEmbeds,
+			Flags:           discordgo.MessageFlagsEphemeral | discordgo.MessageFlagsSuppressEmbeds,
 			AllowedMentions: nobody(),
 		})
 		if err != nil {
@@ -242,6 +257,7 @@ func messageInbound(m *discordgo.MessageCreate, selfID string) (platform.Inbound
 	return platform.Inbound{
 		Platform:    platform.Discord,
 		ChatID:      m.ChannelID,
+		MessageID:   m.ID,
 		UserID:      m.Author.ID,
 		Text:        text,
 		TextMessage: text != "" && !media,

@@ -10,10 +10,11 @@ const (
 
 // Inbound is one user message from Telegram or Discord.
 type Inbound struct {
-	Platform string
-	ChatID   string
-	UserID   string
-	Text     string
+	Platform  string
+	ChatID    string
+	MessageID string
+	UserID    string
+	Text      string
 	// TextMessage is false for photos, voice notes, and other unsupported payloads.
 	TextMessage bool
 }
@@ -21,4 +22,9 @@ type Inbound struct {
 // Replier sends a message back to the chat that produced an inbound message.
 type Replier interface {
 	Send(ctx context.Context, chatID, text string) error
+}
+
+// Receipt marks an accepted message without sending a separate text reply.
+type Receipt interface {
+	MarkReceived(ctx context.Context, in Inbound) error
 }
