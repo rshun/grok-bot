@@ -13,8 +13,6 @@ import (
 	"github.com/rshun/grok-bot/internal/store"
 )
 
-const ackText = "收到，正在处理。"
-
 // Engine is the Grok subscription surface used by the chat core.
 type Engine interface {
 	Reply(ctx context.Context, opts grok.ReplyOptions) (grok.HeadlessResult, error)
@@ -47,7 +45,7 @@ type item struct {
 	out platform.Replier
 }
 
-// Handle acknowledges a message and queues it on that chat.
+// Handle marks an accepted message and queues it on that chat.
 func (s *Service) Handle(ctx context.Context, in platform.Inbound, out platform.Replier) {
 	if in.Platform == "" {
 		in.Platform = platform.Telegram
@@ -71,12 +69,17 @@ func (s *Service) Handle(ctx context.Context, in platform.Inbound, out platform.
 		s.send(ctx, out, in.ChatID, "前面的消息还在处理，这条先放不下了。等回复后再发。")
 		return
 	}
-	ack := ackText
-	if ahead > 0 {
-		ack = fmt.Sprintf("%s前面还有 %d 条。", ackText, ahead)
+	if _, _, command := parseCommand(in.Text); !command {
+		if receipt, ok := out.(platform.Receipt); ok {
+			if err := receipt.MarkReceived(ctx, in); err != nil {
+				// A missing reaction or typing indicator must not prevent the reply.
+				slog.Warn("message receipt failed", "platform", in.Platform)
+			}
+		}
 	}
-	// Acknowledge before the worker starts so the receipt is always first.
-	s.send(ctx, out, in.ChatID, ack)
+	if ahead > 0 {
+		s.send(ctx, out, in.ChatID, fmt.Sprintf("已排队，前面还有 %d 条。", ahead))
+	}
 	lane.enqueue(item{ctx: ctx, in: in, out: out})
 }
 

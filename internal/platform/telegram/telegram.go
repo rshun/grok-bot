@@ -54,6 +54,7 @@ func (b *Bot) Run(ctx context.Context, handler func(context.Context, platform.In
 		in := platform.Inbound{
 			Platform:    platform.Telegram,
 			ChatID:      strconv.FormatInt(msg.Chat.ID, 10),
+			MessageID:   strconv.Itoa(msg.MessageID),
 			UserID:      strconv.FormatInt(msg.From.ID, 10),
 			Text:        text,
 			TextMessage: text != "" && !media,
@@ -79,4 +80,21 @@ func (b *Bot) Send(ctx context.Context, chatID, text string) error {
 		}
 	}
 	return nil
+}
+
+// MarkReceived uses the same receipt reaction as codex-tg-bot.
+func (b *Bot) MarkReceived(ctx context.Context, in platform.Inbound) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if in.MessageID == "" {
+		return nil
+	}
+	_, err := b.api.MakeRequest("setMessageReaction", tgbotapi.Params{
+		"chat_id":    in.ChatID,
+		"message_id": in.MessageID,
+		"reaction":   `[{"type":"emoji","emoji":"👀"}]`,
+		"is_big":     "false",
+	})
+	return err
 }
