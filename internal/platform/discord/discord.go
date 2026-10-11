@@ -85,7 +85,7 @@ func (b *Bot) onMessage(_ *discordgo.Session, m *discordgo.MessageCreate) {
 	if !ok || b.handler == nil {
 		return
 	}
-	b.handler(b.context(), in, b)
+	b.handler(b.context(), in, &messageReply{Bot: b, messageID: in.MessageID})
 }
 
 func (b *Bot) onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -126,15 +126,38 @@ func (b *Bot) context() context.Context {
 }
 
 func (b *Bot) Send(ctx context.Context, chatID, text string) error {
+	return b.send(ctx, chatID, text, "")
+}
+
+// messageReply keeps the triggering message with its queued reply.
+type messageReply struct {
+	*Bot
+	messageID string
+}
+
+func (r *messageReply) Send(ctx context.Context, chatID, text string) error {
+	return r.Bot.send(ctx, chatID, text, r.messageID)
+}
+
+func (b *Bot) send(ctx context.Context, chatID, text, messageID string) error {
 	for _, chunk := range platform.Split(text, chunkLimit) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		_, err := b.session.ChannelMessageSendComplex(chatID, &discordgo.MessageSend{
+		out := &discordgo.MessageSend{
 			Content:         chunk,
 			Flags:           discordgo.MessageFlagsSuppressEmbeds,
 			AllowedMentions: nobody(),
-		})
+		}
+		if messageID != "" {
+			failIfMissing := false
+			out.Reference = &discordgo.MessageReference{
+				MessageID:       messageID,
+				ChannelID:       chatID,
+				FailIfNotExists: &failIfMissing,
+			}
+		}
+		_, err := b.session.ChannelMessageSendComplex(chatID, out)
 		if err != nil {
 			return err
 		}

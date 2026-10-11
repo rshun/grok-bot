@@ -59,12 +59,26 @@ func (b *Bot) Run(ctx context.Context, handler func(context.Context, platform.In
 			Text:        text,
 			TextMessage: text != "" && !media,
 		}
-		handler(ctx, in, b)
+		handler(ctx, in, &messageReply{Bot: b, messageID: msg.MessageID})
 	}
 	return ctx.Err()
 }
 
 func (b *Bot) Send(ctx context.Context, chatID, text string) error {
+	return b.send(ctx, chatID, text, 0)
+}
+
+// messageReply keeps the triggering message with its queued reply.
+type messageReply struct {
+	*Bot
+	messageID int
+}
+
+func (r *messageReply) Send(ctx context.Context, chatID, text string) error {
+	return r.Bot.send(ctx, chatID, text, r.messageID)
+}
+
+func (b *Bot) send(ctx context.Context, chatID, text string, messageID int) error {
 	id, err := strconv.ParseInt(chatID, 10, 64)
 	if err != nil {
 		return fmt.Errorf("chat id: %w", err)
@@ -73,9 +87,16 @@ func (b *Bot) Send(ctx context.Context, chatID, text string) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		out := tgbotapi.NewMessage(id, chunk)
-		out.DisableWebPagePreview = true
-		if _, err := b.api.Send(out); err != nil {
+		params := tgbotapi.Params{
+			"chat_id":                  strconv.FormatInt(id, 10),
+			"text":                     chunk,
+			"disable_web_page_preview": "true",
+		}
+		if messageID > 0 {
+			// MakeRequest supports current Bot API fields without upgrading the SDK.
+			params["reply_parameters"] = fmt.Sprintf(`{"message_id":%d,"allow_sending_without_reply":true}`, messageID)
+		}
+		if _, err := b.api.MakeRequest("sendMessage", params); err != nil {
 			return err
 		}
 	}
