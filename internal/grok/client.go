@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -109,17 +110,7 @@ func (c *Client) Reply(ctx context.Context, opts ReplyOptions) (HeadlessResult, 
 		if ctx.Err() != nil {
 			return HeadlessResult{}, ctx.Err()
 		}
-		detail := strings.TrimSpace(stderr.String())
-		if detail == "" {
-			detail = strings.TrimSpace(stdout.String())
-		}
-		if runErr != nil && detail == "" {
-			return HeadlessResult{}, runErr
-		}
-		if detail == "" {
-			return HeadlessResult{}, parseErr
-		}
-		return HeadlessResult{}, &RunError{Message: firstLine(detail)}
+		return HeadlessResult{}, headlessFailure(stdout.String(), stderr.String(), parseErr, runErr)
 	}
 	if result.SessionID == "" {
 		result.SessionID = opts.SessionID
@@ -128,6 +119,34 @@ func (c *Client) Reply(ctx context.Context, opts ReplyOptions) (HeadlessResult, 
 		return result, &RunError{Message: "grok returned an empty reply"}
 	}
 	return result, nil
+}
+
+func headlessFailure(stdout, stderr string, parseErr, runErr error) error {
+	// The structured CLI error is more useful than progress messages on stderr.
+	var reported *RunError
+	if errors.As(parseErr, &reported) {
+		return parseErr
+	}
+	if _, err := ParseHeadless(stderr); errors.As(err, &reported) {
+		return err
+	}
+	for _, output := range []string{stderr, stdout} {
+		for _, line := range strings.Split(output, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			// This is a successful lookup notice, not a failure or a missing session.
+			if strings.HasPrefix(line, "Session ") && strings.Contains(line, " found locally (originally in ") && strings.HasSuffix(line, ")") {
+				continue
+			}
+			return &RunError{Message: firstLine(line)}
+		}
+	}
+	if runErr != nil {
+		return runErr
+	}
+	return parseErr
 }
 
 func (c *Client) Models(ctx context.Context) (ModelList, error) {
