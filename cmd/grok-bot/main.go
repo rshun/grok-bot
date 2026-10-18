@@ -52,6 +52,7 @@ func main() {
 		AllowedUsers: map[string]map[string]struct{}{},
 		QueueLimit:   cfg.QueueLimit,
 		Version:      cfg.Version,
+		WebSearch:    cfg.WebSearch,
 	}
 	type runner struct {
 		name string

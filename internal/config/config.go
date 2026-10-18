@@ -30,6 +30,7 @@ type Config struct {
 	UserURL       string
 	GrokTimeout   time.Duration
 	QueueLimit    int
+	WebSearch     bool
 	Version       string
 }
 
@@ -77,6 +78,13 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("QUEUE_LIMIT must be a positive integer")
 		}
 	}
+	webSearch := true
+	if raw := strings.TrimSpace(os.Getenv("WEB_SEARCH")); raw != "" {
+		webSearch, err = strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("WEB_SEARCH must be true or false")
+		}
+	}
 	model := strings.TrimSpace(os.Getenv("DEFAULT_MODEL"))
 	if model == "" {
 		model = defaultModel
@@ -110,6 +118,7 @@ func Load() (Config, error) {
 		UserURL:       userURL,
 		GrokTimeout:   timeout,
 		QueueLimit:    queueLimit,
+		WebSearch:     webSearch,
 	}, nil
 }
 

@@ -60,3 +60,25 @@ func TestLoadRejectsNonNumericDiscordID(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestLoadWebSearch(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "tg-token")
+	t.Setenv("DISCORD_BOT_TOKEN", "")
+	t.Setenv("ALLOWED_USER_IDS", "1")
+	t.Setenv("WEB_SEARCH", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.WebSearch {
+		t.Fatal("web search should default to on")
+	}
+	t.Setenv("WEB_SEARCH", "false")
+	if cfg, err = Load(); err != nil || cfg.WebSearch {
+		t.Fatalf("WEB_SEARCH=false: %v %v", cfg.WebSearch, err)
+	}
+	t.Setenv("WEB_SEARCH", "maybe")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for WEB_SEARCH=maybe")
+	}
+}

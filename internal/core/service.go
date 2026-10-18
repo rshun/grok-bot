@@ -28,6 +28,8 @@ type Service struct {
 	AllowedUsers map[string]map[string]struct{}
 	QueueLimit   int
 	Version      string
+	// WebSearch lets Grok search the web and open pages during chat turns.
+	WebSearch bool
 
 	mu    sync.Mutex
 	lanes map[string]*lane
@@ -223,6 +225,7 @@ func (s *Service) chat(ctx context.Context, in platform.Inbound) (string, error)
 		NewSession: newSession,
 		Model:      chat.Model,
 		Prompt:     in.Text,
+		WebSearch:  s.WebSearch,
 	})
 	if err != nil && !newSession && sessionMissing(err) {
 		sessionID, idErr := newUUID()
@@ -234,6 +237,7 @@ func (s *Service) chat(ctx context.Context, in platform.Inbound) (string, error)
 			NewSession: true,
 			Model:      chat.Model,
 			Prompt:     in.Text,
+			WebSearch:  s.WebSearch,
 		})
 		if err != nil {
 			return "", err
