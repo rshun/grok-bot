@@ -228,7 +228,33 @@ func (s *Service) modelCommand(ctx context.Context, in platform.Inbound, arg str
 	return "已切换到 " + arg + "。下一条消息开始使用。", nil
 }
 
+// chat applies write grants from the message, runs the turn, and adds the
+// confirmations before the reply and the /reset reminder after it.
 func (s *Service) chat(ctx context.Context, in platform.Inbound) (string, error) {
+	notes := s.applyGrants(ctx, in.Text)
+	reply, err := s.chatTurn(ctx, in)
+	if err != nil {
+		return "", err
+	}
+	if len(notes) > 0 {
+		reply = strings.Join(notes, "\n") + "\n\n" + reply
+	}
+	if mentionsPath(in.Text) && s.needsReset(ctx, in) {
+		reply += "\n\n" + resetReminder
+	}
+	return reply, nil
+}
+
+// needsReset reports whether file tools are available but this chat's session predates them.
+func (s *Service) needsReset(ctx context.Context, in platform.Inbound) bool {
+	if ready, _, _ := s.fileAccess(ctx); !ready {
+		return false
+	}
+	chat, err := s.Store.Chat(ctx, in.Platform, in.ChatID)
+	return err == nil && chat.SessionID != "" && chat.Sandbox != sandbox.ProfileName
+}
+
+func (s *Service) chatTurn(ctx context.Context, in platform.Inbound) (string, error) {
 	chat, err := s.Store.Chat(ctx, in.Platform, in.ChatID)
 	if err != nil {
 		return "", err
@@ -242,7 +268,7 @@ func (s *Service) chat(ctx context.Context, in platform.Inbound) (string, error)
 	// A resumed session keeps the sandbox it was created with; grok refuses a different one.
 	opts.Sandbox = chat.Sandbox
 	if chat.Sandbox == sandbox.ProfileName {
-		if ready, _, rw, _ := s.fileAccess(ctx); ready {
+		if ready, rw, _ := s.fileAccess(ctx); ready {
 			opts.FileTools = true
 			opts.WriteDirs = rw
 		}

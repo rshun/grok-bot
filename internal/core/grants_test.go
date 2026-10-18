@@ -2,6 +2,7 @@ package core
 
 import (
 	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -45,5 +46,21 @@ func TestMentionsPath(t *testing.T) {
 		if got := mentionsPath(text); got != want {
 			t.Errorf("%q: got %v, want %v", text, got, want)
 		}
+	}
+}
+
+func TestParseGrantsWindowsDrivePaths(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		if grant, _ := parseGrants(`允许写入 C:\out`); grant != nil {
+			t.Fatalf("drive path accepted off Windows: %q", grant)
+		}
+		return
+	}
+	grant, revoke := parseGrants(`允许写入 C:\Temp\out，取消写入 D:/old`)
+	if len(grant) != 1 || grant[0] != `C:\Temp\out` || len(revoke) != 1 || revoke[0] != "D:/old" {
+		t.Fatalf("got %q %q", grant, revoke)
+	}
+	if !mentionsPath(`看看 C:\Temp`) {
+		t.Fatal("drive path not noticed")
 	}
 }

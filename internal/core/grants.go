@@ -1,6 +1,7 @@
 package core
 
 import (
+	"runtime"
 	"strings"
 	"unicode"
 )
@@ -56,7 +57,7 @@ func pathsAfter(clause string, phrases []string) []string {
 		rest = rest[i+len(phrase):]
 		for {
 			trimmed := strings.TrimLeft(rest, listSeparators)
-			if !strings.HasPrefix(trimmed, "/") {
+			if !pathStart(trimmed) {
 				break
 			}
 			path, n := pathToken(trimmed)
@@ -83,7 +84,7 @@ func firstPhrase(text string, phrases []string) (int, string) {
 func allPaths(text string) []string {
 	var out []string
 	for i := 0; i < len(text); {
-		if text[i] != '/' || (i > 0 && isASCIIAlnum(text[i-1])) {
+		if !pathStart(text[i:]) || (i > 0 && isASCIIAlnum(text[i-1])) {
 			i++
 			continue
 		}
@@ -119,6 +120,15 @@ func pathToken(text string) (string, int) {
 		return "", end
 	}
 	return path, end
+}
+
+// pathStart reports whether text begins with an absolute path: /x, or C:\x and C:/x on Windows.
+func pathStart(text string) bool {
+	if strings.HasPrefix(text, "/") {
+		return true
+	}
+	return runtime.GOOS == "windows" && len(text) >= 3 && text[0] < 0x80 && unicode.IsLetter(rune(text[0])) &&
+		text[1] == ':' && (text[2] == '\\' || text[2] == '/')
 }
 
 func isASCIIAlnum(b byte) bool {
