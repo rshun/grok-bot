@@ -175,3 +175,30 @@ func TestSyncRefusesUnmanagedFile(t *testing.T) {
 		t.Fatalf("unmanaged file changed: %s", raw)
 	}
 }
+
+func TestSyncWithoutBwrapDropsDenyList(t *testing.T) {
+	p := testPolicy(t)
+	path := filepath.Join(t.TempDir(), "sandbox.toml")
+	m := &Manager{Path: path, Policy: p, Enabled: true, DenyAvailable: func() bool { return false }}
+	if err := m.Sync([]string{"/a"}); !errors.Is(err, ErrDenyUnavailable) {
+		t.Fatalf("got %v, want ErrDenyUnavailable", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(raw)
+	if !strings.HasPrefix(out, marker+"\n") || !strings.Contains(out, "[profiles.grokbot]") || !strings.Contains(out, `"/a"`) {
+		t.Fatalf("profile not written for resumed sessions:\n%s", out)
+	}
+	if strings.Contains(out, "deny") {
+		t.Fatalf("deny list written without bwrap:\n%s", out)
+	}
+	m.DenyAvailable = func() bool { return true }
+	if err := m.Sync([]string{"/a"}); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ = os.ReadFile(path); !strings.Contains(string(raw), "deny = ") {
+		t.Fatalf("deny list not restored once bwrap exists:\n%s", raw)
+	}
+}

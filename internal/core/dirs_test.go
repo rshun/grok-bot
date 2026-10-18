@@ -288,3 +288,65 @@ func TestDirAddReadOnlyNotNeeded(t *testing.T) {
 		t.Fatalf("%#v", dirs)
 	}
 }
+
+func noBwrapService(t *testing.T) (*Service, *fakeEngine) {
+	t.Helper()
+	svc, engine, manager := sandboxService(t)
+	manager.DenyAvailable = func() bool { return false }
+	return svc, engine
+}
+
+func TestNoBwrapNewSessionIsPlain(t *testing.T) {
+	svc, engine := noBwrapService(t)
+	rec := &recorder{}
+	say(svc, rec, "看看 /srv")
+	got := rec.wait(t, 1)
+	if got[0] != "pong" {
+		t.Fatalf("%#v", got)
+	}
+	engine.mu.Lock()
+	call := engine.calls[0]
+	engine.mu.Unlock()
+	if call.Sandbox != "" || call.FileTools {
+		t.Fatalf("%#v", call)
+	}
+	if chat, _ := svc.Store.Chat(context.Background(), "telegram", "9"); chat.Sandbox != "" {
+		t.Fatalf("%#v", chat)
+	}
+}
+
+func TestNoBwrapResumedSandboxSessionKeepsContext(t *testing.T) {
+	svc, engine := noBwrapService(t)
+	ctx := context.Background()
+	if err := svc.Store.StartSession(ctx, "telegram", "9", "s1", sandbox.ProfileName); err != nil {
+		t.Fatal(err)
+	}
+	rec := &recorder{}
+	say(svc, rec, "继续")
+	rec.wait(t, 1)
+	engine.mu.Lock()
+	call := engine.calls[0]
+	engine.mu.Unlock()
+	if call.NewSession || call.SessionID != "s1" || call.Sandbox != sandbox.ProfileName || call.FileTools {
+		t.Fatalf("%#v", call)
+	}
+}
+
+func TestNoBwrapGrantExplains(t *testing.T) {
+	svc, _ := noBwrapService(t)
+	dir, real := realDir(t)
+	rec := &recorder{}
+	say(svc, rec, "允许写入 "+dir)
+	got := rec.wait(t, 1)
+	if !strings.Contains(got[0], "已允许写入 "+real+"。") || !strings.Contains(got[0], "没有安装 bubblewrap") {
+		t.Fatalf("%#v", got)
+	}
+	if dirs, _ := svc.Store.Dirs(context.Background()); len(dirs) != 1 {
+		t.Fatalf("%#v", dirs)
+	}
+	say(svc, rec, "/dir")
+	got = rec.wait(t, 2)
+	if !strings.Contains(got[1], "没有安装 bubblewrap") {
+		t.Fatalf("%#v", got)
+	}
+}

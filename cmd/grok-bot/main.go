@@ -51,8 +51,9 @@ func main() {
 		os.Exit(1)
 	}
 	sandboxManager := &sandbox.Manager{
-		Path:    filepath.Join(home, ".grok", "sandbox.toml"),
-		Enabled: sandbox.Supported(),
+		Path:          filepath.Join(home, ".grok", "sandbox.toml"),
+		Enabled:       sandbox.Supported(),
+		DenyAvailable: sandbox.BwrapAvailable,
 		Policy: sandbox.Policy{
 			Home:     home,
 			DataDir:  dataDir,
