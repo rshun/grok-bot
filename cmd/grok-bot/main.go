@@ -14,6 +14,7 @@ import (
 	"github.com/rshun/grok-bot/internal/platform"
 	"github.com/rshun/grok-bot/internal/platform/discord"
 	"github.com/rshun/grok-bot/internal/platform/telegram"
+	"github.com/rshun/grok-bot/internal/sandbox"
 	"github.com/rshun/grok-bot/internal/store"
 )
 
@@ -38,6 +39,26 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		slog.Error("home dir", "err", err)
+		os.Exit(1)
+	}
+	dataDir, err := filepath.Abs(cfg.DataDir)
+	if err != nil {
+		slog.Error("data dir", "err", err)
+		os.Exit(1)
+	}
+	sandboxManager := &sandbox.Manager{
+		Path:    filepath.Join(home, ".grok", "sandbox.toml"),
+		Enabled: sandbox.Supported(),
+		Policy: sandbox.Policy{
+			Home:     home,
+			DataDir:  dataDir,
+			EnvFile:  cfg.EnvFile,
+			AuthPath: cfg.AuthPath,
+		},
+	}
 	engine := &grok.Client{
 		Bin:        cfg.GrokBin,
 		Workspace:  workspace,
@@ -53,6 +74,7 @@ func main() {
 		QueueLimit:   cfg.QueueLimit,
 		Version:      cfg.Version,
 		WebSearch:    cfg.WebSearch,
+		Sandbox:      sandboxManager,
 	}
 	type runner struct {
 		name string

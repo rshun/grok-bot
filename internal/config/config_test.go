@@ -82,3 +82,18 @@ func TestLoadWebSearch(t *testing.T) {
 		t.Fatal("expected error for WEB_SEARCH=maybe")
 	}
 }
+
+func TestLoadEnvFile(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "tg-token")
+	t.Setenv("DISCORD_BOT_TOKEN", "")
+	t.Setenv("ALLOWED_USER_IDS", "1")
+	t.Setenv("BOT_ENV_FILE", "")
+	cfg, err := Load()
+	if err != nil || cfg.EnvFile != "/etc/grok-tg-bot.env" {
+		t.Fatalf("%q %v", cfg.EnvFile, err)
+	}
+	t.Setenv("BOT_ENV_FILE", "/opt/bot/bot.env")
+	if cfg, err = Load(); err != nil || cfg.EnvFile != "/opt/bot/bot.env" {
+		t.Fatalf("%q %v", cfg.EnvFile, err)
+	}
+}

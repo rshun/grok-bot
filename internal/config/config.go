@@ -31,6 +31,7 @@ type Config struct {
 	GrokTimeout   time.Duration
 	QueueLimit    int
 	WebSearch     bool
+	EnvFile       string
 	Version       string
 }
 
@@ -85,6 +86,10 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("WEB_SEARCH must be true or false")
 		}
 	}
+	envFile := strings.TrimSpace(os.Getenv("BOT_ENV_FILE"))
+	if envFile == "" {
+		envFile = "/etc/grok-tg-bot.env"
+	}
 	model := strings.TrimSpace(os.Getenv("DEFAULT_MODEL"))
 	if model == "" {
 		model = defaultModel
@@ -119,6 +124,7 @@ func Load() (Config, error) {
 		GrokTimeout:   timeout,
 		QueueLimit:    queueLimit,
 		WebSearch:     webSearch,
+		EnvFile:       envFile,
 	}, nil
 }
 
