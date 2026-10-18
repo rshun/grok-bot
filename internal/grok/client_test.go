@@ -44,3 +44,131 @@ func TestHeadlessFailurePreservesParseErrorWithoutProcessError(t *testing.T) {
 		t.Fatalf("got %v, want original parse error %v", got, parseErr)
 	}
 }
+
+func argValue(t *testing.T, args []string, flag string) string {
+	t.Helper()
+	for i, arg := range args {
+		if arg == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	t.Fatalf("%s missing from %q", flag, args)
+	return ""
+}
+
+func hasArg(args []string, flag string) bool {
+	for _, arg := range args {
+		if arg == flag {
+			return true
+		}
+	}
+	return false
+}
+
+func hasTool(list, name string) bool {
+	for _, item := range strings.Split(list, ",") {
+		if item == name {
+			return true
+		}
+	}
+	return false
+}
+
+func TestReplyArgsWebSearch(t *testing.T) {
+	base := ReplyOptions{SessionID: "sess", NewSession: true, Model: "grok-4.7", Prompt: "hi"}
+
+	off := replyArgs("/ws", base)
+	if !hasArg(off, "--disable-web-search") {
+		t.Fatalf("web search not disabled: %q", off)
+	}
+	tools := argValue(t, off, "--disallowed-tools")
+	if !hasTool(tools, "web_search") || !hasTool(tools, "web_fetch") {
+		t.Fatalf("web tools allowed while off: %s", tools)
+	}
+	if argValue(t, off, "-s") != "sess" {
+		t.Fatalf("new session flag: %q", off)
+	}
+
+	on := base
+	on.WebSearch = true
+	on.NewSession = false
+	args := replyArgs("/ws", on)
+	if hasArg(args, "--disable-web-search") {
+		t.Fatalf("web search still disabled: %q", args)
+	}
+	tools = argValue(t, args, "--disallowed-tools")
+	if hasTool(tools, "web_search") || hasTool(tools, "web_fetch") {
+		t.Fatalf("web tools still disallowed: %s", tools)
+	}
+	if !hasTool(tools, "run_terminal_cmd") || !hasTool(tools, "read_file") {
+		t.Fatalf("shell or file tools opened: %s", tools)
+	}
+	if !strings.Contains(argValue(t, args, "--system-prompt-override"), "search the web") {
+		t.Fatal("system prompt does not mention web search")
+	}
+	if argValue(t, args, "-r") != "sess" {
+		t.Fatalf("resume flag: %q", args)
+	}
+}
+
+var wantFileTools = []string{"read_file", "list_dir", "grep", "search_replace", "write"}
+
+func TestReplyArgsFiles(t *testing.T) {
+	opts := ReplyOptions{
+		SessionID: "sess", NewSession: true, Model: "grok-4.7", Prompt: "hi",
+		Sandbox: "grokbot", FileTools: true,
+		ReadDirs: []string{"/srv/notes"}, WriteDirs: []string{"/srv/out"},
+	}
+	args := replyArgs("/ws", opts)
+	if argValue(t, args, "--sandbox") != "grokbot" {
+		t.Fatalf("sandbox: %q", args)
+	}
+	tools := argValue(t, args, "--disallowed-tools")
+	for _, name := range wantFileTools {
+		if hasTool(tools, name) {
+			t.Fatalf("%s still disallowed: %s", name, tools)
+		}
+	}
+	if !hasTool(tools, "run_terminal_cmd") {
+		t.Fatalf("shell opened: %s", tools)
+	}
+	prompt := argValue(t, args, "--system-prompt-override")
+	if !strings.Contains(prompt, "/srv/notes") || !strings.Contains(prompt, "/srv/out") || strings.Contains(prompt, "do not read or edit files") {
+		t.Fatalf("prompt: %s", prompt)
+	}
+
+	opts.FileTools = false
+	opts.Sandbox = ""
+	args = replyArgs("/ws", opts)
+	if hasArg(args, "--sandbox") {
+		t.Fatalf("sandbox passed: %q", args)
+	}
+	tools = argValue(t, args, "--disallowed-tools")
+	for _, name := range wantFileTools {
+		if !hasTool(tools, name) {
+			t.Fatalf("%s allowed without file access: %s", name, tools)
+		}
+	}
+}
+
+func TestReplyArgsJSONSchema(t *testing.T) {
+	args := replyArgs("/ws", ReplyOptions{
+		SessionID: "sess", NewSession: true, Model: "grok-4.7", Prompt: "hi",
+		WebSearch: true, Sandbox: "grokbot", FileTools: true, JSONSchema: `{"type":"object"}`,
+	})
+	if argValue(t, args, "--json-schema") != `{"type":"object"}` {
+		t.Fatalf("schema: %q", args)
+	}
+	if argValue(t, args, "--max-turns") != "2" {
+		t.Fatalf("max turns: %q", args)
+	}
+	if hasArg(args, "--sandbox") {
+		t.Fatalf("sandbox passed for schema call: %q", args)
+	}
+	tools := argValue(t, args, "--disallowed-tools")
+	for _, name := range append([]string{"web_search", "web_fetch", "search_tool", "use_tool"}, wantFileTools...) {
+		if !hasTool(tools, name) {
+			t.Fatalf("%s allowed in schema call: %s", name, tools)
+		}
+	}
+}

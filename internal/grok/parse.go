@@ -38,6 +38,8 @@ type HeadlessResult struct {
 	Text       string
 	SessionID  string
 	StopReason string
+	// Structured is the --json-schema result, when grok returns one.
+	Structured json.RawMessage
 }
 
 type optionalFloat struct {
@@ -285,6 +287,8 @@ type headlessEnvelope struct {
 	Text       string `json:"text"`
 	StopReason string `json:"stopReason"`
 	SessionID  string `json:"sessionId"`
+
+	StructuredOutput json.RawMessage `json:"structured_output"`
 }
 
 // ParseHeadless reads the JSON result of a headless grok run.
@@ -308,6 +312,7 @@ func ParseHeadless(output string) (HeadlessResult, error) {
 		Text:       strings.TrimSpace(env.Text),
 		SessionID:  env.SessionID,
 		StopReason: env.StopReason,
+		Structured: env.StructuredOutput,
 	}, nil
 }
 

@@ -256,3 +256,32 @@ func TestAllowlistIsPerPlatform(t *testing.T) {
 		t.Fatalf("%#v", got)
 	}
 }
+
+func TestChatPassesWebSearchIncludingRebuild(t *testing.T) {
+	svc, engine := testService(t)
+	svc.WebSearch = true
+	if err := svc.Store.SetSession(context.Background(), "telegram", "9", "old"); err != nil {
+		t.Fatal(err)
+	}
+	engine.replyFor = func(opts grok.ReplyOptions) (grok.HeadlessResult, error) {
+		if !opts.NewSession {
+			return grok.HeadlessResult{}, errors.New("Session old not found")
+		}
+		return grok.HeadlessResult{Text: "pong", SessionID: opts.SessionID}, nil
+	}
+	rec := &recorder{}
+	svc.Handle(context.Background(), platform.Inbound{
+		Platform: "telegram", ChatID: "9", UserID: "1", Text: "hello", TextMessage: true,
+	}, capture{rec})
+	rec.wait(t, 1)
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	if len(engine.calls) != 2 {
+		t.Fatalf("%#v", engine.calls)
+	}
+	for i, call := range engine.calls {
+		if !call.WebSearch {
+			t.Fatalf("call %d without web search", i)
+		}
+	}
+}

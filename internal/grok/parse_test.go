@@ -78,3 +78,17 @@ func TestValidModelName(t *testing.T) {
 		t.Fatal("model name check")
 	}
 }
+
+func TestParseHeadlessStructured(t *testing.T) {
+	got, err := ParseHeadless(`{"text":"","sessionId":"s","structured_output":{"kind":"daily"}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got.Structured) != `{"kind":"daily"}` || got.SessionID != "s" {
+		t.Fatalf("%#v", got)
+	}
+	got, err = ParseHeadless(`{"text":"hello","sessionId":"s"}`)
+	if err != nil || len(got.Structured) != 0 || got.Text != "hello" {
+		t.Fatalf("%#v %v", got, err)
+	}
+}

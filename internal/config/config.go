@@ -30,7 +30,13 @@ type Config struct {
 	UserURL       string
 	GrokTimeout   time.Duration
 	QueueLimit    int
-	Version       string
+	WebSearch     bool
+	EnvFile       string
+	// Location is the time zone for scheduled tasks.
+	Location        *time.Location
+	TaskLimit       int
+	TaskMinInterval time.Duration
+	Version         string
 }
 
 func Load() (Config, error) {
@@ -77,6 +83,38 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("QUEUE_LIMIT must be a positive integer")
 		}
 	}
+	webSearch := true
+	if raw := strings.TrimSpace(os.Getenv("WEB_SEARCH")); raw != "" {
+		webSearch, err = strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("WEB_SEARCH must be true or false")
+		}
+	}
+	envFile := strings.TrimSpace(os.Getenv("BOT_ENV_FILE"))
+	if envFile == "" {
+		envFile = "/etc/grok-tg-bot.env"
+	}
+	location := time.Local
+	if raw := strings.TrimSpace(os.Getenv("TIMEZONE")); raw != "" {
+		location, err = time.LoadLocation(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TIMEZONE: %w", err)
+		}
+	}
+	taskLimit := 20
+	if raw := strings.TrimSpace(os.Getenv("TASK_LIMIT")); raw != "" {
+		taskLimit, err = strconv.Atoi(raw)
+		if err != nil || taskLimit < 1 {
+			return Config{}, fmt.Errorf("TASK_LIMIT must be a positive integer")
+		}
+	}
+	minInterval := time.Hour
+	if raw := strings.TrimSpace(os.Getenv("TASK_MIN_INTERVAL")); raw != "" {
+		minInterval, err = time.ParseDuration(raw)
+		if err != nil || minInterval <= 0 {
+			return Config{}, fmt.Errorf("TASK_MIN_INTERVAL must be a positive duration such as 60m")
+		}
+	}
 	model := strings.TrimSpace(os.Getenv("DEFAULT_MODEL"))
 	if model == "" {
 		model = defaultModel
@@ -98,18 +136,23 @@ func Load() (Config, error) {
 		userURL = defaultUserURL
 	}
 	return Config{
-		TelegramToken: token,
-		DiscordToken:  discordToken,
-		TelegramUsers: allowed,
-		DiscordUsers:  discordUsers,
-		DataDir:       dataDir,
-		DefaultModel:  model,
-		GrokBin:       bin,
-		AuthPath:      auth,
-		BillingURL:    billing,
-		UserURL:       userURL,
-		GrokTimeout:   timeout,
-		QueueLimit:    queueLimit,
+		TelegramToken:   token,
+		DiscordToken:    discordToken,
+		TelegramUsers:   allowed,
+		DiscordUsers:    discordUsers,
+		DataDir:         dataDir,
+		DefaultModel:    model,
+		GrokBin:         bin,
+		AuthPath:        auth,
+		BillingURL:      billing,
+		UserURL:         userURL,
+		GrokTimeout:     timeout,
+		QueueLimit:      queueLimit,
+		WebSearch:       webSearch,
+		EnvFile:         envFile,
+		Location:        location,
+		TaskLimit:       taskLimit,
+		TaskMinInterval: minInterval,
 	}, nil
 }
 

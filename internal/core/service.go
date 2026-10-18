@@ -7,9 +7,11 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/rshun/grok-bot/internal/grok"
 	"github.com/rshun/grok-bot/internal/platform"
+	"github.com/rshun/grok-bot/internal/sandbox"
 	"github.com/rshun/grok-bot/internal/store"
 )
 
@@ -28,6 +30,17 @@ type Service struct {
 	AllowedUsers map[string]map[string]struct{}
 	QueueLimit   int
 	Version      string
+	// WebSearch lets Grok search the web and open pages during chat turns.
+	WebSearch bool
+	// Sandbox limits file access for new sessions; nil turns file tools off.
+	Sandbox *sandbox.Manager
+	// Senders post scheduled task results to a chat, keyed by platform name.
+	Senders         map[string]platform.Replier
+	Location        *time.Location
+	TaskLimit       int
+	TaskMinInterval time.Duration
+	// Now is the clock for scheduling; nil means time.Now.
+	Now func() time.Time
 
 	mu    sync.Mutex
 	lanes map[string]*lane
@@ -43,6 +56,8 @@ type item struct {
 	ctx context.Context
 	in  platform.Inbound
 	out platform.Replier
+	// task is set when the item is a scheduled run rather than a user message.
+	task *store.Task
 }
 
 // Handle marks an accepted message and queues it on that chat.
@@ -140,6 +155,10 @@ func (s *Service) dispatch(it item) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if it.task != nil {
+		s.send(ctx, it.out, it.in.ChatID, s.runTask(ctx, *it.task))
+		return
+	}
 	reply, err := s.answer(ctx, it.in)
 	if err != nil {
 		slog.Error("chat turn failed", "chat", it.in.ChatID, "err", err)
@@ -174,6 +193,10 @@ func (s *Service) command(ctx context.Context, in platform.Inbound, cmd, arg str
 			return "暂时查不到剩余额度。", nil
 		}
 		return text, nil
+	case "/dir":
+		return s.dirCommand(ctx, in, arg)
+	case "/task":
+		return s.taskCommand(ctx, in, arg)
 	case "/reset":
 		if err := s.Store.ClearSession(ctx, in.Platform, in.ChatID); err != nil {
 			return "", err
@@ -210,43 +233,52 @@ func (s *Service) chat(ctx context.Context, in platform.Inbound) (string, error)
 	if err != nil {
 		return "", err
 	}
-	newSession := chat.SessionID == ""
-	sessionID := chat.SessionID
-	if newSession {
-		sessionID, err = newUUID()
-		if err != nil {
-			return "", err
+	base := grok.ReplyOptions{Model: chat.Model, Prompt: in.Text, WebSearch: s.WebSearch}
+	if chat.SessionID == "" {
+		return s.startSession(ctx, in, base)
+	}
+	opts := base
+	opts.SessionID = chat.SessionID
+	// A resumed session keeps the sandbox it was created with; grok refuses a different one.
+	opts.Sandbox = chat.Sandbox
+	if chat.Sandbox == sandbox.ProfileName {
+		if ready, ro, rw, _ := s.fileAccess(ctx); ready {
+			opts.FileTools = true
+			opts.ReadDirs = ro
+			opts.WriteDirs = rw
 		}
 	}
-	result, err := s.Engine.Reply(ctx, grok.ReplyOptions{
-		SessionID:  sessionID,
-		NewSession: newSession,
-		Model:      chat.Model,
-		Prompt:     in.Text,
-	})
-	if err != nil && !newSession && sessionMissing(err) {
-		sessionID, idErr := newUUID()
-		if idErr != nil {
-			return "", err
-		}
-		result, err = s.Engine.Reply(ctx, grok.ReplyOptions{
-			SessionID:  sessionID,
-			NewSession: true,
-			Model:      chat.Model,
-			Prompt:     in.Text,
-		})
+	result, err := s.Engine.Reply(ctx, opts)
+	if err != nil && sessionMissing(err) {
+		text, err := s.startSession(ctx, in, base)
 		if err != nil {
 			return "", err
 		}
-		if saveErr := s.Store.SetSession(ctx, in.Platform, in.ChatID, result.SessionID); saveErr != nil {
-			return "", saveErr
-		}
-		return "之前的上下文已经失效，这是新的一段对话。\n\n" + result.Text, nil
+		return "之前的上下文已经失效，这是新的一段对话。\n\n" + text, nil
 	}
 	if err != nil {
 		return "", err
 	}
 	if err := s.Store.SetSession(ctx, in.Platform, in.ChatID, result.SessionID); err != nil {
+		return "", err
+	}
+	return result.Text, nil
+}
+
+// startSession runs the turn in a new Grok session and records the sandbox it was created with.
+func (s *Service) startSession(ctx context.Context, in platform.Inbound, opts grok.ReplyOptions) (string, error) {
+	sessionID, err := newUUID()
+	if err != nil {
+		return "", err
+	}
+	opts.SessionID = sessionID
+	opts.NewSession = true
+	profile := s.newSessionOptions(ctx, &opts)
+	result, err := s.Engine.Reply(ctx, opts)
+	if err != nil {
+		return "", err
+	}
+	if err := s.Store.StartSession(ctx, in.Platform, in.ChatID, result.SessionID, profile); err != nil {
 		return "", err
 	}
 	return result.Text, nil
@@ -286,6 +318,14 @@ func helpText(version string) string {
     切换这个聊天之后使用的模型
 /usage
     查看订阅剩余额度
+/dir
+    查看或管理 Grok 可以读写的目录
+/task 一句话
+    创建定时任务，例如 /task 每天九点总结科技新闻
+/task list
+    查看定时任务
+/task del 编号
+    删除定时任务
 /reset
     清空这个聊天的上下文
 /help

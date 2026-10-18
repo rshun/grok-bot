@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/rshun/grok-bot/internal/config"
 	"github.com/rshun/grok-bot/internal/core"
@@ -14,6 +15,7 @@ import (
 	"github.com/rshun/grok-bot/internal/platform"
 	"github.com/rshun/grok-bot/internal/platform/discord"
 	"github.com/rshun/grok-bot/internal/platform/telegram"
+	"github.com/rshun/grok-bot/internal/sandbox"
 	"github.com/rshun/grok-bot/internal/store"
 )
 
@@ -38,6 +40,26 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		slog.Error("home dir", "err", err)
+		os.Exit(1)
+	}
+	dataDir, err := filepath.Abs(cfg.DataDir)
+	if err != nil {
+		slog.Error("data dir", "err", err)
+		os.Exit(1)
+	}
+	sandboxManager := &sandbox.Manager{
+		Path:    filepath.Join(home, ".grok", "sandbox.toml"),
+		Enabled: sandbox.Supported(),
+		Policy: sandbox.Policy{
+			Home:     home,
+			DataDir:  dataDir,
+			EnvFile:  cfg.EnvFile,
+			AuthPath: cfg.AuthPath,
+		},
+	}
 	engine := &grok.Client{
 		Bin:        cfg.GrokBin,
 		Workspace:  workspace,
@@ -47,11 +69,17 @@ func main() {
 		Timeout:    cfg.GrokTimeout,
 	}
 	svc := &core.Service{
-		Store:        db,
-		Engine:       engine,
-		AllowedUsers: map[string]map[string]struct{}{},
-		QueueLimit:   cfg.QueueLimit,
-		Version:      cfg.Version,
+		Store:           db,
+		Engine:          engine,
+		AllowedUsers:    map[string]map[string]struct{}{},
+		QueueLimit:      cfg.QueueLimit,
+		Version:         cfg.Version,
+		WebSearch:       cfg.WebSearch,
+		Sandbox:         sandboxManager,
+		Senders:         map[string]platform.Replier{},
+		Location:        cfg.Location,
+		TaskLimit:       cfg.TaskLimit,
+		TaskMinInterval: cfg.TaskMinInterval,
 	}
 	type runner struct {
 		name string
@@ -66,6 +94,7 @@ func main() {
 			os.Exit(1)
 		}
 		svc.AllowedUsers[platform.Telegram] = cfg.TelegramUsers
+		svc.Senders[platform.Telegram] = bot
 		logArgs = append(logArgs, "telegram", bot.Username())
 		runners = append(runners, runner{name: "telegram", run: func(ctx context.Context) error {
 			return bot.Run(ctx, svc.Handle)
@@ -78,6 +107,7 @@ func main() {
 			os.Exit(1)
 		}
 		svc.AllowedUsers[platform.Discord] = cfg.DiscordUsers
+		svc.Senders[platform.Discord] = bot
 		logArgs = append(logArgs, "discord", bot.Username())
 		runners = append(runners, runner{name: "discord", run: func(ctx context.Context) error {
 			return bot.Run(ctx, svc.Handle)
@@ -86,6 +116,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	slog.Info("listening", logArgs...)
+	go svc.RunScheduler(ctx, 30*time.Second)
 	errCh := make(chan error, len(runners))
 	for _, item := range runners {
 		go func(item runner) {

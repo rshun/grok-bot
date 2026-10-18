@@ -3,6 +3,7 @@ package discord
 import (
 	"context"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"github.com/bwmarrin/discordgo"
@@ -73,6 +74,62 @@ func (b *Bot) registerCommands() error {
 					Name:        "name",
 					Description: "要切换的模型名",
 					Required:    false,
+				},
+			},
+		},
+		{
+			Name:        "dir",
+			Description: "查看或管理 Grok 可以读写的目录",
+			Options: []*discordgo.ApplicationCommandOption{
+				{Type: discordgo.ApplicationCommandOptionSubCommand, Name: "list", Description: "查看开放的目录"},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "add",
+					Description: "开放一个目录",
+					Options: []*discordgo.ApplicationCommandOption{
+						{
+							Type:        discordgo.ApplicationCommandOptionString,
+							Name:        "mode",
+							Description: "权限",
+							Required:    true,
+							Choices: []*discordgo.ApplicationCommandOptionChoice{
+								{Name: "只读", Value: "ro"},
+								{Name: "可读写", Value: "rw"},
+							},
+						},
+						{Type: discordgo.ApplicationCommandOptionString, Name: "path", Description: "绝对路径", Required: true},
+					},
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "del",
+					Description: "移除一个目录",
+					Options: []*discordgo.ApplicationCommandOption{
+						{Type: discordgo.ApplicationCommandOptionString, Name: "path", Description: "绝对路径", Required: true},
+					},
+				},
+			},
+		},
+		{
+			Name:        "task",
+			Description: "管理定时任务",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "add",
+					Description: "用一句话创建定时任务",
+					Options: []*discordgo.ApplicationCommandOption{
+						{Type: discordgo.ApplicationCommandOptionString, Name: "text", Description: "例如：每天早上九点总结科技新闻", Required: true},
+					},
+				},
+				{Type: discordgo.ApplicationCommandOptionSubCommand, Name: "list", Description: "查看定时任务"},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "del",
+					Description: "删除定时任务",
+					Options: []*discordgo.ApplicationCommandOption{
+						{Type: discordgo.ApplicationCommandOptionInteger, Name: "id", Description: "任务编号", Required: true},
+					},
 				},
 			},
 		},
@@ -249,11 +306,45 @@ func commandText(data discordgo.ApplicationCommandInteractionData) string {
 			}
 		}
 		return "/model"
+	case "dir", "task":
+		return subcommandText(data)
 	default:
 		if data.Name == "" {
 			return "/"
 		}
 		return "/" + data.Name
+	}
+}
+
+// subcommandText maps /dir and /task subcommands to the text commands the core understands.
+func subcommandText(data discordgo.ApplicationCommandInteractionData) string {
+	base := "/" + data.Name
+	if len(data.Options) == 0 {
+		return base
+	}
+	sub := data.Options[0]
+	values := map[string]string{}
+	for _, opt := range sub.Options {
+		switch opt.Type {
+		case discordgo.ApplicationCommandOptionInteger:
+			values[opt.Name] = strconv.FormatInt(opt.IntValue(), 10)
+		case discordgo.ApplicationCommandOptionString:
+			values[opt.Name] = strings.TrimSpace(opt.StringValue())
+		}
+	}
+	switch {
+	case data.Name == "dir" && sub.Name == "add":
+		return strings.Join([]string{base, "add", values["mode"], values["path"]}, " ")
+	case sub.Name == "del" && data.Name == "dir":
+		return base + " del " + values["path"]
+	case sub.Name == "del":
+		return base + " del " + values["id"]
+	case data.Name == "task" && sub.Name == "add":
+		return base + " " + values["text"]
+	case data.Name == "task" && sub.Name == "list":
+		return base + " list"
+	default:
+		return base
 	}
 }
 
