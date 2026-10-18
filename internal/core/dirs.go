@@ -192,6 +192,11 @@ func (s *Service) fileAccess(ctx context.Context) (ready bool, rw []string, reas
 			slog.Error("sandbox profile is not managed by the bot", "path", s.Sandbox.Path)
 			return false, nil, s.Sandbox.Path + " 不是 bot 生成的，请管理员手动合并 grokbot 配置。"
 		}
+		if errors.Is(err, sandbox.ErrDenyUnavailable) {
+			// Without bubblewrap the deny list cannot be enforced, so no file is readable at all.
+			slog.Warn("bubblewrap not found, file tools disabled")
+			return false, nil, "服务器没有安装 bubblewrap（bwrap），无法保护敏感文件，文件功能已关闭。"
+		}
 		slog.Error("write sandbox profile", "err", err)
 		return false, nil, "写入沙箱配置失败。"
 	}

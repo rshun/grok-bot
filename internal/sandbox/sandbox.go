@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -21,6 +22,19 @@ const marker = "# managed by grok-bot; do not edit"
 
 // ErrUnmanaged means the profile file exists but was not written by the bot.
 var ErrUnmanaged = errors.New("sandbox.toml 不是 bot 生成的")
+
+// ErrDenyUnavailable means grok cannot enforce the deny list here, so the
+// profile was written without it and file tools must stay off.
+var ErrDenyUnavailable = errors.New("deny list cannot be enforced")
+
+// BwrapAvailable reports whether grok can enforce a deny list: on Linux it needs bubblewrap.
+func BwrapAvailable() bool {
+	if runtime.GOOS != "linux" {
+		return true
+	}
+	_, err := exec.LookPath("bwrap")
+	return err == nil
+}
 
 // systemPaths may never be granted, nor any directory above or below them.
 var systemPaths = []string{"/etc", "/proc", "/sys", "/dev", "/boot", "/root"}
@@ -103,6 +117,12 @@ func within(path, dir string) bool {
 // Render returns the full sandbox.toml content. Grok may read whatever the
 // service user can read, minus deny, and write only to readWrite.
 func Render(readWrite []string, p Policy) string {
+	return render(readWrite, p, true)
+}
+
+// render leaves out the deny list when grok cannot enforce it; grok refuses
+// to start a profile whose deny list it cannot apply.
+func render(readWrite []string, p Policy, withDeny bool) string {
 	deny := []string{
 		p.AuthPath,
 		filepath.Join(p.Home, ".ssh"),
@@ -120,7 +140,9 @@ func Render(readWrite []string, p Policy) string {
 	// MCP servers run as child processes and still need the network.
 	b.WriteString("restrict_network = false\n")
 	b.WriteString("read_write = " + tomlList(readWrite) + "\n")
-	b.WriteString("deny = " + tomlList(deny) + "\n")
+	if withDeny {
+		b.WriteString("deny = " + tomlList(deny) + "\n")
+	}
 	return b.String()
 }
 
@@ -142,6 +164,8 @@ type Manager struct {
 	Path    string
 	Policy  Policy
 	Enabled bool
+	// DenyAvailable reports whether grok can enforce the deny list; nil means it can.
+	DenyAvailable func() bool
 
 	mu sync.Mutex
 }
@@ -159,10 +183,21 @@ func (m *Manager) Sync(readWrite []string) error {
 	case !errors.Is(err, os.ErrNotExist):
 		return err
 	}
-	content := Render(readWrite, m.Policy)
-	if string(current) == content {
-		return nil
+	withDeny := m.DenyAvailable == nil || m.DenyAvailable()
+	content := render(readWrite, m.Policy, withDeny)
+	if string(current) != content {
+		if err := m.write(content); err != nil {
+			return err
+		}
 	}
+	if !withDeny {
+		return ErrDenyUnavailable
+	}
+	return nil
+}
+
+// write replaces the profile file atomically.
+func (m *Manager) write(content string) error {
 	if err := os.MkdirAll(filepath.Dir(m.Path), 0o700); err != nil {
 		return err
 	}
