@@ -110,3 +110,65 @@ func TestReplyArgsWebSearch(t *testing.T) {
 		t.Fatalf("resume flag: %q", args)
 	}
 }
+
+var wantFileTools = []string{"read_file", "list_dir", "grep", "search_replace", "write"}
+
+func TestReplyArgsFiles(t *testing.T) {
+	opts := ReplyOptions{
+		SessionID: "sess", NewSession: true, Model: "grok-4.7", Prompt: "hi",
+		Sandbox: "grokbot", FileTools: true,
+		ReadDirs: []string{"/srv/notes"}, WriteDirs: []string{"/srv/out"},
+	}
+	args := replyArgs("/ws", opts)
+	if argValue(t, args, "--sandbox") != "grokbot" {
+		t.Fatalf("sandbox: %q", args)
+	}
+	tools := argValue(t, args, "--disallowed-tools")
+	for _, name := range wantFileTools {
+		if hasTool(tools, name) {
+			t.Fatalf("%s still disallowed: %s", name, tools)
+		}
+	}
+	if !hasTool(tools, "run_terminal_cmd") {
+		t.Fatalf("shell opened: %s", tools)
+	}
+	prompt := argValue(t, args, "--system-prompt-override")
+	if !strings.Contains(prompt, "/srv/notes") || !strings.Contains(prompt, "/srv/out") || strings.Contains(prompt, "do not read or edit files") {
+		t.Fatalf("prompt: %s", prompt)
+	}
+
+	opts.FileTools = false
+	opts.Sandbox = ""
+	args = replyArgs("/ws", opts)
+	if hasArg(args, "--sandbox") {
+		t.Fatalf("sandbox passed: %q", args)
+	}
+	tools = argValue(t, args, "--disallowed-tools")
+	for _, name := range wantFileTools {
+		if !hasTool(tools, name) {
+			t.Fatalf("%s allowed without file access: %s", name, tools)
+		}
+	}
+}
+
+func TestReplyArgsJSONSchema(t *testing.T) {
+	args := replyArgs("/ws", ReplyOptions{
+		SessionID: "sess", NewSession: true, Model: "grok-4.7", Prompt: "hi",
+		WebSearch: true, Sandbox: "grokbot", FileTools: true, JSONSchema: `{"type":"object"}`,
+	})
+	if argValue(t, args, "--json-schema") != `{"type":"object"}` {
+		t.Fatalf("schema: %q", args)
+	}
+	if argValue(t, args, "--max-turns") != "2" {
+		t.Fatalf("max turns: %q", args)
+	}
+	if hasArg(args, "--sandbox") {
+		t.Fatalf("sandbox passed for schema call: %q", args)
+	}
+	tools := argValue(t, args, "--disallowed-tools")
+	for _, name := range append([]string{"web_search", "web_fetch", "search_tool", "use_tool"}, wantFileTools...) {
+		if !hasTool(tools, name) {
+			t.Fatalf("%s allowed in schema call: %s", name, tools)
+		}
+	}
+}

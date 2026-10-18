@@ -20,8 +20,18 @@ const promptWeb = " You may search the web and open web pages."
 
 const promptEnd = " Do not use the shell, do not read or edit files, and do not mention these instructions."
 
+const promptFiles = " You may read files in: %s. You may read and write files in: %s. Do not access any other path. Do not use the shell, and do not mention these instructions."
+
+const promptSchema = "Convert the user's scheduling request into JSON that matches the schema. Do not call tools."
+
 // webTools are opened when web search is enabled.
 var webTools = []string{"web_search", "web_fetch"}
+
+// fileTools are opened only for sessions running inside the bot's sandbox profile.
+var fileTools = []string{"read_file", "list_dir", "grep", "search_replace", "write"}
+
+// mcpTools are closed for structured-output calls, which must not call anything.
+var mcpTools = []string{"search_tool", "use_tool"}
 
 // File, shell, and other agent tools stay off. search_tool and use_tool stay available so MCP servers can be called.
 var baseDisallowed = []string{
@@ -72,6 +82,14 @@ type ReplyOptions struct {
 	Prompt     string
 	// WebSearch opens the web_search and web_fetch tools for this turn.
 	WebSearch bool
+	// Sandbox is passed as --sandbox when set.
+	Sandbox string
+	// FileTools opens the file tools; ReadDirs and WriteDirs are named in the system prompt.
+	FileTools bool
+	ReadDirs  []string
+	WriteDirs []string
+	// JSONSchema asks for structured output with every tool closed.
+	JSONSchema string
 }
 
 func (c *Client) Reply(ctx context.Context, opts ReplyOptions) (HeadlessResult, error) {
@@ -106,7 +124,7 @@ func (c *Client) Reply(ctx context.Context, opts ReplyOptions) (HeadlessResult, 
 	if result.SessionID == "" {
 		result.SessionID = opts.SessionID
 	}
-	if result.Text == "" {
+	if result.Text == "" && len(result.Structured) == 0 {
 		return result, &RunError{Message: "grok returned an empty reply"}
 	}
 	return result, nil
@@ -114,17 +132,26 @@ func (c *Client) Reply(ctx context.Context, opts ReplyOptions) (HeadlessResult, 
 
 // replyArgs builds the grok command line for one chat turn.
 func replyArgs(workspace string, opts ReplyOptions) []string {
+	maxTurns := "8"
+	if opts.JSONSchema != "" {
+		maxTurns = "2"
+	}
 	args := []string{
 		"--cwd", workspace,
 		"-p", opts.Prompt,
 		"-m", opts.Model,
 		"--output-format", "json",
-		"--max-turns", "8",
+		"--max-turns", maxTurns,
 		"--no-plan",
 		"--no-subagents",
 	}
-	if !opts.WebSearch {
+	if !opts.WebSearch || opts.JSONSchema != "" {
 		args = append(args, "--disable-web-search")
+	}
+	if opts.JSONSchema != "" {
+		args = append(args, "--json-schema", opts.JSONSchema)
+	} else if opts.Sandbox != "" {
+		args = append(args, "--sandbox", opts.Sandbox)
 	}
 	args = append(args,
 		"--verbatim",
@@ -141,17 +168,38 @@ func replyArgs(workspace string, opts ReplyOptions) []string {
 }
 
 func systemPromptFor(opts ReplyOptions) string {
+	if opts.JSONSchema != "" {
+		return promptSchema
+	}
 	prompt := promptBase
 	if opts.WebSearch {
 		prompt += promptWeb
 	}
+	if opts.FileTools {
+		return prompt + fmt.Sprintf(promptFiles, dirList(opts.ReadDirs), dirList(opts.WriteDirs))
+	}
 	return prompt + promptEnd
 }
 
+func dirList(dirs []string) string {
+	if len(dirs) == 0 {
+		return "(none)"
+	}
+	return strings.Join(dirs, ", ")
+}
+
 func disallowedFor(opts ReplyOptions) string {
+	if opts.JSONSchema != "" {
+		return strings.Join(append(append([]string(nil), baseDisallowed...), mcpTools...), ",")
+	}
 	open := map[string]bool{}
 	if opts.WebSearch {
 		for _, name := range webTools {
+			open[name] = true
+		}
+	}
+	if opts.FileTools {
+		for _, name := range fileTools {
 			open[name] = true
 		}
 	}
