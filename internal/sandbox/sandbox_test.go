@@ -109,16 +109,15 @@ func TestCheckDirAccepts(t *testing.T) {
 
 func TestRender(t *testing.T) {
 	p := Policy{Home: "/home/grok", DataDir: "/var/lib/bot", EnvFile: "/etc/bot.env", AuthPath: "/home/grok/.grok/auth.json"}
-	out := Render([]string{"/srv/ro"}, []string{`C:\rw`}, p)
+	out := Render([]string{`C:\rw`}, p)
 	lines := strings.Split(out, "\n")
 	if lines[0] != marker {
 		t.Fatalf("first line %q", lines[0])
 	}
 	for _, want := range []string{
 		"[profiles.grokbot]",
-		`extends = "strict"`,
+		`extends = "read-only"`,
 		"restrict_network = false",
-		`read_only = ["/srv/ro"]`,
 		`read_write = ["C:\\rw"]`,
 		`"/home/grok/.grok/auth.json"`,
 		tomlPath(filepath.Join("/home/grok", ".ssh")),
@@ -133,8 +132,11 @@ func TestRender(t *testing.T) {
 			t.Fatalf("missing %s in:\n%s", want, out)
 		}
 	}
-	if empty := Render(nil, nil, p); !strings.Contains(empty, "read_only = []") || !strings.Contains(empty, "read_write = []") {
-		t.Fatalf("empty lists:\n%s", empty)
+	if strings.Contains(out, "read_only") || strings.Contains(out, `extends = "strict"`) {
+		t.Fatalf("old strict profile fields remain:\n%s", out)
+	}
+	if empty := Render(nil, p); !strings.Contains(empty, "read_write = []") {
+		t.Fatalf("empty list:\n%s", empty)
 	}
 }
 
@@ -147,14 +149,14 @@ func TestSyncRefusesUnmanagedFile(t *testing.T) {
 	p := testPolicy(t)
 	path := filepath.Join(t.TempDir(), "sandbox.toml")
 	m := &Manager{Path: path, Policy: p, Enabled: true}
-	if err := m.Sync([]string{"/a"}, nil); err != nil {
+	if err := m.Sync([]string{"/a"}); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil || !strings.Contains(string(raw), `"/a"`) {
 		t.Fatalf("created %q %v", raw, err)
 	}
-	if err := m.Sync([]string{"/b"}, nil); err != nil {
+	if err := m.Sync([]string{"/b"}); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ = os.ReadFile(path)
@@ -165,7 +167,7 @@ func TestSyncRefusesUnmanagedFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte(manual), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Sync([]string{"/c"}, nil); !errors.Is(err, ErrUnmanaged) {
+	if err := m.Sync([]string{"/c"}); !errors.Is(err, ErrUnmanaged) {
 		t.Fatalf("got %v, want ErrUnmanaged", err)
 	}
 	raw, _ = os.ReadFile(path)

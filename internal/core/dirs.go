@@ -125,7 +125,7 @@ func (s *Service) fileAccess(ctx context.Context) (ready bool, ro, rw []string, 
 			ro = append(ro, d.Path)
 		}
 	}
-	if err := s.Sandbox.Sync(ro, rw); err != nil {
+	if err := s.Sandbox.Sync(rw); err != nil {
 		if errors.Is(err, sandbox.ErrUnmanaged) {
 			slog.Error("sandbox profile is not managed by the bot", "path", s.Sandbox.Path)
 			return false, nil, nil, s.Sandbox.Path + " 不是 bot 生成的，请管理员手动合并 grokbot 配置。"
