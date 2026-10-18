@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestLoadRequiresOnePlatform(t *testing.T) {
 	t.Setenv("TELEGRAM_BOT_TOKEN", "")
@@ -95,5 +98,35 @@ func TestLoadEnvFile(t *testing.T) {
 	t.Setenv("BOT_ENV_FILE", "/opt/bot/bot.env")
 	if cfg, err = Load(); err != nil || cfg.EnvFile != "/opt/bot/bot.env" {
 		t.Fatalf("%q %v", cfg.EnvFile, err)
+	}
+}
+
+func TestLoadTaskSettings(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "tg-token")
+	t.Setenv("DISCORD_BOT_TOKEN", "")
+	t.Setenv("ALLOWED_USER_IDS", "1")
+	t.Setenv("TIMEZONE", "")
+	t.Setenv("TASK_LIMIT", "")
+	t.Setenv("TASK_MIN_INTERVAL", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Location != time.Local || cfg.TaskLimit != 20 || cfg.TaskMinInterval != time.Hour {
+		t.Fatalf("%v %d %v", cfg.Location, cfg.TaskLimit, cfg.TaskMinInterval)
+	}
+	t.Setenv("TIMEZONE", "UTC")
+	t.Setenv("TASK_LIMIT", "5")
+	t.Setenv("TASK_MIN_INTERVAL", "90m")
+	if cfg, err = Load(); err != nil || cfg.Location.String() != "UTC" || cfg.TaskLimit != 5 || cfg.TaskMinInterval != 90*time.Minute {
+		t.Fatalf("%v %d %v %v", cfg.Location, cfg.TaskLimit, cfg.TaskMinInterval, err)
+	}
+	for env, value := range map[string]string{"TIMEZONE": "Nowhere/Zone", "TASK_LIMIT": "0", "TASK_MIN_INTERVAL": "0s"} {
+		t.Run(env, func(t *testing.T) {
+			t.Setenv(env, value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("%s=%s accepted", env, value)
+			}
+		})
 	}
 }

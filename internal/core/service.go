@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/rshun/grok-bot/internal/grok"
 	"github.com/rshun/grok-bot/internal/platform"
@@ -33,6 +34,13 @@ type Service struct {
 	WebSearch bool
 	// Sandbox limits file access for new sessions; nil turns file tools off.
 	Sandbox *sandbox.Manager
+	// Senders post scheduled task results to a chat, keyed by platform name.
+	Senders         map[string]platform.Replier
+	Location        *time.Location
+	TaskLimit       int
+	TaskMinInterval time.Duration
+	// Now is the clock for scheduling; nil means time.Now.
+	Now func() time.Time
 
 	mu    sync.Mutex
 	lanes map[string]*lane
@@ -48,6 +56,8 @@ type item struct {
 	ctx context.Context
 	in  platform.Inbound
 	out platform.Replier
+	// task is set when the item is a scheduled run rather than a user message.
+	task *store.Task
 }
 
 // Handle marks an accepted message and queues it on that chat.
@@ -145,6 +155,10 @@ func (s *Service) dispatch(it item) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if it.task != nil {
+		s.send(ctx, it.out, it.in.ChatID, s.runTask(ctx, *it.task))
+		return
+	}
 	reply, err := s.answer(ctx, it.in)
 	if err != nil {
 		slog.Error("chat turn failed", "chat", it.in.ChatID, "err", err)
@@ -181,6 +195,8 @@ func (s *Service) command(ctx context.Context, in platform.Inbound, cmd, arg str
 		return text, nil
 	case "/dir":
 		return s.dirCommand(ctx, in, arg)
+	case "/task":
+		return s.taskCommand(ctx, in, arg)
 	case "/reset":
 		if err := s.Store.ClearSession(ctx, in.Platform, in.ChatID); err != nil {
 			return "", err
@@ -304,6 +320,12 @@ func helpText(version string) string {
     查看订阅剩余额度
 /dir
     查看或管理 Grok 可以读写的目录
+/task 一句话
+    创建定时任务，例如 /task 每天九点总结科技新闻
+/task list
+    查看定时任务
+/task del 编号
+    删除定时任务
 /reset
     清空这个聊天的上下文
 /help
