@@ -72,3 +72,33 @@ func TestCommandText(t *testing.T) {
 		t.Fatalf("%q", got)
 	}
 }
+
+func TestCommandTextSubcommands(t *testing.T) {
+	sub := func(command, name string, opts ...*discordgo.ApplicationCommandInteractionDataOption) discordgo.ApplicationCommandInteractionData {
+		return discordgo.ApplicationCommandInteractionData{
+			Name: command,
+			Options: []*discordgo.ApplicationCommandInteractionDataOption{
+				{Name: name, Type: discordgo.ApplicationCommandOptionSubCommand, Options: opts},
+			},
+		}
+	}
+	str := func(name, value string) *discordgo.ApplicationCommandInteractionDataOption {
+		return &discordgo.ApplicationCommandInteractionDataOption{Name: name, Type: discordgo.ApplicationCommandOptionString, Value: value}
+	}
+	cases := []struct {
+		data discordgo.ApplicationCommandInteractionData
+		want string
+	}{
+		{sub("dir", "list"), "/dir"},
+		{sub("dir", "add", str("mode", "rw"), str("path", " /srv/a ")), "/dir add rw /srv/a"},
+		{sub("dir", "del", str("path", "/srv/a")), "/dir del /srv/a"},
+		{sub("task", "add", str("text", "每天九点看新闻")), "/task 每天九点看新闻"},
+		{sub("task", "list"), "/task list"},
+		{sub("task", "del", &discordgo.ApplicationCommandInteractionDataOption{Name: "id", Type: discordgo.ApplicationCommandOptionInteger, Value: float64(3)}), "/task del 3"},
+	}
+	for _, tc := range cases {
+		if got := commandText(tc.data); got != tc.want {
+			t.Errorf("got %q, want %q", got, tc.want)
+		}
+	}
+}
