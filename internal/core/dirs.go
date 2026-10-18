@@ -138,13 +138,12 @@ func (s *Service) fileAccess(ctx context.Context) (ready bool, ro, rw []string, 
 
 // newSessionOptions fills the sandbox fields for a brand-new session and returns the profile to record.
 func (s *Service) newSessionOptions(ctx context.Context, opts *grok.ReplyOptions) string {
-	ready, ro, rw, _ := s.fileAccess(ctx)
+	ready, _, rw, _ := s.fileAccess(ctx)
 	if !ready {
 		return ""
 	}
 	opts.Sandbox = sandbox.ProfileName
 	opts.FileTools = true
-	opts.ReadDirs = ro
 	opts.WriteDirs = rw
 	return sandbox.ProfileName
 }

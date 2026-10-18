@@ -242,9 +242,8 @@ func (s *Service) chat(ctx context.Context, in platform.Inbound) (string, error)
 	// A resumed session keeps the sandbox it was created with; grok refuses a different one.
 	opts.Sandbox = chat.Sandbox
 	if chat.Sandbox == sandbox.ProfileName {
-		if ready, ro, rw, _ := s.fileAccess(ctx); ready {
+		if ready, _, rw, _ := s.fileAccess(ctx); ready {
 			opts.FileTools = true
-			opts.ReadDirs = ro
 			opts.WriteDirs = rw
 		}
 	}
