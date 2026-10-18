@@ -100,8 +100,9 @@ func within(path, dir string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
-// Render returns the full sandbox.toml content for the granted directories.
-func Render(readOnly, readWrite []string, p Policy) string {
+// Render returns the full sandbox.toml content. Grok may read whatever the
+// service user can read, minus deny, and write only to readWrite.
+func Render(readWrite []string, p Policy) string {
 	deny := []string{
 		p.AuthPath,
 		filepath.Join(p.Home, ".ssh"),
@@ -115,10 +116,9 @@ func Render(readOnly, readWrite []string, p Policy) string {
 	var b strings.Builder
 	b.WriteString(marker + "\n")
 	b.WriteString("[profiles." + ProfileName + "]\n")
-	b.WriteString("extends = \"strict\"\n")
+	b.WriteString("extends = \"read-only\"\n")
 	// MCP servers run as child processes and still need the network.
 	b.WriteString("restrict_network = false\n")
-	b.WriteString("read_only = " + tomlList(readOnly) + "\n")
 	b.WriteString("read_write = " + tomlList(readWrite) + "\n")
 	b.WriteString("deny = " + tomlList(deny) + "\n")
 	return b.String()
@@ -147,7 +147,7 @@ type Manager struct {
 }
 
 // Sync rewrites the profile file. It refuses to replace a file the bot did not write.
-func (m *Manager) Sync(readOnly, readWrite []string) error {
+func (m *Manager) Sync(readWrite []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	current, err := os.ReadFile(m.Path)
@@ -159,7 +159,7 @@ func (m *Manager) Sync(readOnly, readWrite []string) error {
 	case !errors.Is(err, os.ErrNotExist):
 		return err
 	}
-	content := Render(readOnly, readWrite, m.Policy)
+	content := Render(readWrite, m.Policy)
 	if string(current) == content {
 		return nil
 	}

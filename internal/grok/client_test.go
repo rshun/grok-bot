@@ -116,8 +116,7 @@ var wantFileTools = []string{"read_file", "list_dir", "grep", "search_replace", 
 func TestReplyArgsFiles(t *testing.T) {
 	opts := ReplyOptions{
 		SessionID: "sess", NewSession: true, Model: "grok-4.7", Prompt: "hi",
-		Sandbox: "grokbot", FileTools: true,
-		ReadDirs: []string{"/srv/notes"}, WriteDirs: []string{"/srv/out"},
+		Sandbox: "grokbot", FileTools: true, WriteDirs: []string{"/srv/out"},
 	}
 	args := replyArgs("/ws", opts)
 	if argValue(t, args, "--sandbox") != "grokbot" {
@@ -129,12 +128,25 @@ func TestReplyArgsFiles(t *testing.T) {
 			t.Fatalf("%s still disallowed: %s", name, tools)
 		}
 	}
-	if !hasTool(tools, "run_terminal_cmd") {
+	if !hasTool(tools, "run_terminal_cmd") || !hasTool(tools, "run_terminal_command") {
 		t.Fatalf("shell opened: %s", tools)
 	}
 	prompt := argValue(t, args, "--system-prompt-override")
-	if !strings.Contains(prompt, "/srv/notes") || !strings.Contains(prompt, "/srv/out") || strings.Contains(prompt, "do not read or edit files") {
-		t.Fatalf("prompt: %s", prompt)
+	for _, want := range []string{
+		"You may read any file the system lets you read.",
+		"You may write only in: /srv/out.",
+		"Never run files or commands.",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("missing %q in prompt: %s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "do not read or edit files") {
+		t.Fatalf("prompt still forbids files: %s", prompt)
+	}
+	opts.WriteDirs = nil
+	if prompt := argValue(t, replyArgs("/ws", opts), "--system-prompt-override"); !strings.Contains(prompt, "You may write only in: (none).") {
+		t.Fatalf("empty write list: %s", prompt)
 	}
 
 	opts.FileTools = false

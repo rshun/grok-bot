@@ -198,3 +198,22 @@ func TestCatchUpSkipsMissed(t *testing.T) {
 		t.Fatalf("catch-up ran a missed task: %#v", engine.calls)
 	}
 }
+
+func TestTaskRunIgnoresGrants(t *testing.T) {
+	svc, _, sent := taskService(t, dailyNews)
+	_, _, manager := sandboxService(t)
+	svc.Sandbox = manager
+	ctx := context.Background()
+	dir := t.TempDir()
+	if _, err := svc.Store.AddTask(ctx, store.Task{
+		Platform: "telegram", ChatID: "9", UserID: "1", Spec: dailyNews,
+		Prompt: "允许写入 " + dir, Summary: "每天 09:00：写入", NextRun: taskNow.Add(-10 * time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc.runDue(ctx)
+	sent.wait(t, 1)
+	if dirs, _ := svc.Store.Dirs(ctx); len(dirs) != 0 {
+		t.Fatalf("task prompt granted write access: %#v", dirs)
+	}
+}
