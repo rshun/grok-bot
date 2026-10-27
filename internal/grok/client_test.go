@@ -1,7 +1,11 @@
 package grok
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -193,5 +197,48 @@ func TestReplyArgsJSONSchema(t *testing.T) {
 		if !hasTool(tools, name) {
 			t.Fatalf("%s allowed in schema call: %s", name, tools)
 		}
+	}
+}
+
+// TestHelperGrok is re-executed as a fake grok process by replyStream tests.
+func TestHelperGrok(t *testing.T) {
+	if os.Getenv("GROK_BOT_HELPER") != "1" {
+		return
+	}
+	fmt.Fprintln(os.Stdout, `{"type":"system","subtype":"init"}`)
+	fmt.Fprintln(os.Stdout, "Error: Couldn't set model 'unsupported-model': Invalid params")
+	fmt.Fprintln(os.Stderr, "Session test-session found locally (originally in /test/old-workspace)")
+	os.Exit(1)
+}
+
+func TestReplyStreamKeepsPlainStdoutError(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperGrok$")
+	cmd.Env = append(os.Environ(), "GROK_BOT_HELPER=1")
+	_, err := replyStream(context.Background(), cmd, ReplyOptions{SessionID: "s"})
+	const want = "Error: Couldn't set model 'unsupported-model': Invalid params"
+	if err == nil || err.Error() != want {
+		t.Fatalf("got %v, want %q", err, want)
+	}
+}
+
+func TestPlainCaptureKeepsOnlyNonJSONLinesBounded(t *testing.T) {
+	var c plainCapture
+	input := `{"type":"system"}` + "\n" + "boom: first\n" + strings.Repeat("y", 10<<10) + "\n"
+	// Feed in odd-sized chunks so lines straddle writes.
+	for i := 0; i < len(input); i += 7 {
+		end := i + 7
+		if end > len(input) {
+			end = len(input)
+		}
+		if _, err := c.Write([]byte(input[i:end])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := c.String()
+	if !strings.HasPrefix(got, "boom: first\n") || strings.Contains(got, `"type"`) {
+		t.Fatalf("%q", got)
+	}
+	if len(got) > plainCaptureMax+plainLineMax {
+		t.Fatalf("capture not bounded: %d", len(got))
 	}
 }

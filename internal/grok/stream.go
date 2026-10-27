@@ -36,45 +36,79 @@ type streamBlock struct {
 
 // ParseStream reads --output-format streaming-messages-json output, calling
 // onTool for each tool call as it arrives, and returns the final result.
-// onTool may be nil.
+// onTool may be nil. A line longer than maxStreamLine is skipped, not fatal.
 func ParseStream(r io.Reader, onTool func(ToolUse)) (HeadlessResult, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64<<10), maxStreamLine)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || line[0] != '{' {
-			continue
+	reader := bufio.NewReaderSize(r, 64<<10)
+	for {
+		raw, readErr := readStreamLine(reader)
+		if result, done, err := parseStreamLine(strings.TrimSpace(string(raw)), onTool); done {
+			return result, err
 		}
-		var msg streamLine
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			continue
+		if readErr == io.EOF {
+			return HeadlessResult{}, errors.New("grok stream ended without a result")
 		}
-		switch msg.Type {
-		case "assistant":
-			if onTool != nil {
-				reportToolUses(msg.Message, onTool)
-			}
-		case "error":
-			var detail string
-			_ = json.Unmarshal(msg.Message, &detail)
-			if detail == "" {
-				detail = "grok reported an error"
-			}
-			return HeadlessResult{}, &RunError{Message: detail}
-		case "result":
-			if msg.IsError || msg.Subtype != "success" {
-				return HeadlessResult{}, &RunError{Message: resultFailure(msg)}
-			}
-			return HeadlessResult{
-				Text:      strings.TrimSpace(msg.Result),
-				SessionID: msg.SessionID,
-			}, nil
+		if readErr != nil {
+			return HeadlessResult{}, fmt.Errorf("read grok stream: %w", readErr)
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return HeadlessResult{}, fmt.Errorf("read grok stream: %w", err)
+}
+
+// readStreamLine returns the next line without its newline. A line longer than maxStreamLine
+// is consumed in full but returned empty, so one huge line cannot end the turn. The error is
+// io.EOF after the last line, which may come with data when it had no trailing newline.
+func readStreamLine(r *bufio.Reader) ([]byte, error) {
+	var line []byte
+	tooLong := false
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if !tooLong {
+			line = append(line, chunk...)
+			if len(line) > maxStreamLine {
+				tooLong = true
+				line = nil
+			}
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		if tooLong {
+			line = nil
+		}
+		return line, err
 	}
-	return HeadlessResult{}, errors.New("grok stream ended without a result")
+}
+
+// parseStreamLine handles one stream line. done is true when the line ends the turn.
+func parseStreamLine(line string, onTool func(ToolUse)) (result HeadlessResult, done bool, err error) {
+	if line == "" || line[0] != '{' {
+		return HeadlessResult{}, false, nil
+	}
+	var msg streamLine
+	if json.Unmarshal([]byte(line), &msg) != nil {
+		return HeadlessResult{}, false, nil
+	}
+	switch msg.Type {
+	case "assistant":
+		if onTool != nil {
+			reportToolUses(msg.Message, onTool)
+		}
+	case "error":
+		var detail string
+		_ = json.Unmarshal(msg.Message, &detail)
+		if detail == "" {
+			detail = "grok reported an error"
+		}
+		return HeadlessResult{}, true, &RunError{Message: detail}
+	case "result":
+		if msg.IsError || msg.Subtype != "success" {
+			return HeadlessResult{}, true, &RunError{Message: resultFailure(msg)}
+		}
+		return HeadlessResult{
+			Text:      strings.TrimSpace(msg.Result),
+			SessionID: msg.SessionID,
+		}, true, nil
+	}
+	return HeadlessResult{}, false, nil
 }
 
 func reportToolUses(raw json.RawMessage, onTool func(ToolUse)) {

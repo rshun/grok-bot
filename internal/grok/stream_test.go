@@ -144,3 +144,27 @@ func TestParseStreamLongLine(t *testing.T) {
 		t.Fatalf("got %+v, %v", res, err)
 	}
 }
+
+func TestParseStreamSkipsOverlongLine(t *testing.T) {
+	junk := strings.Repeat("x", maxStreamLine+(1<<20))
+	stream := `{"type":"user","message":"` + junk + `"}` + "\n" +
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"web_search","input":{}}]}}` + "\n" +
+		`{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s"}` + "\n"
+	var tools []string
+	res, err := ParseStream(strings.NewReader(stream), func(tu ToolUse) { tools = append(tools, tu.Name) })
+	if err != nil || res.Text != "ok" || res.SessionID != "s" {
+		t.Fatalf("got %+v, %v", res, err)
+	}
+	if len(tools) != 1 || tools[0] != "web_search" {
+		t.Fatalf("tools after the skipped line: %v", tools)
+	}
+}
+
+func TestParseStreamOverlongLineWithoutNewlineAtEOF(t *testing.T) {
+	stream := `{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s"}` + "\n" +
+		strings.Repeat("x", maxStreamLine+10)
+	res, err := ParseStream(strings.NewReader(stream), nil)
+	if err != nil || res.Text != "ok" {
+		t.Fatalf("got %+v, %v", res, err)
+	}
+}

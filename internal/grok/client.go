@@ -147,9 +147,12 @@ func replyStream(ctx context.Context, cmd *exec.Cmd, opts ReplyOptions) (Headles
 	if err := cmd.Start(); err != nil {
 		return HeadlessResult{}, err
 	}
-	result, parseErr := ParseStream(stdout, opts.OnTool)
+	// Keep plain-text lines (a failing grok prints its error there) for headlessFailure.
+	var plain plainCapture
+	tee := io.TeeReader(stdout, &plain)
+	result, parseErr := ParseStream(tee, opts.OnTool)
 	// Drain what is left so grok never blocks on a full pipe before Wait.
-	_, _ = io.Copy(io.Discard, stdout)
+	_, _ = io.Copy(io.Discard, tee)
 	runErr := cmd.Wait()
 	if parseErr != nil {
 		if ctx.Err() != nil {
@@ -159,7 +162,7 @@ func replyStream(ctx context.Context, cmd *exec.Cmd, opts ReplyOptions) (Headles
 		if errors.As(parseErr, &reported) {
 			return HeadlessResult{}, parseErr
 		}
-		return HeadlessResult{}, headlessFailure("", stderr.String(), parseErr, runErr)
+		return HeadlessResult{}, headlessFailure(plain.String(), stderr.String(), parseErr, runErr)
 	}
 	if result.SessionID == "" {
 		result.SessionID = opts.SessionID
@@ -409,4 +412,57 @@ func firstLine(text string) string {
 		text = string([]rune(text)[:500])
 	}
 	return text
+}
+
+const (
+	// plainCaptureMax bounds the non-JSON stdout kept for error reporting.
+	plainCaptureMax = 4 << 10
+	// plainLineMax bounds how much of one line is inspected.
+	plainLineMax = 1 << 10
+)
+
+// plainCapture is an io.Writer that keeps the first few KB of stdout lines that are not JSON
+// objects. A failing grok prints plain-text errors there, and the event stream is otherwise
+// parsed without keeping them.
+type plainCapture struct {
+	kept bytes.Buffer
+	line []byte
+	// jsonLine is set once the current line is known to be a JSON object.
+	jsonLine bool
+}
+
+func (c *plainCapture) Write(p []byte) (int, error) {
+	for _, b := range p {
+		if b == '\n' {
+			c.endLine()
+			continue
+		}
+		if c.jsonLine || len(c.line) >= plainLineMax {
+			continue
+		}
+		if len(c.line) == 0 && (b == ' ' || b == '\t' || b == '\r') {
+			continue
+		}
+		if len(c.line) == 0 && b == '{' {
+			c.jsonLine = true
+			continue
+		}
+		c.line = append(c.line, b)
+	}
+	return len(p), nil
+}
+
+func (c *plainCapture) endLine() {
+	if len(c.line) > 0 && c.kept.Len() < plainCaptureMax {
+		c.kept.Write(c.line)
+		c.kept.WriteByte('\n')
+	}
+	c.line = c.line[:0]
+	c.jsonLine = false
+}
+
+// String returns the captured lines, including a last line that had no newline.
+func (c *plainCapture) String() string {
+	c.endLine()
+	return c.kept.String()
 }
