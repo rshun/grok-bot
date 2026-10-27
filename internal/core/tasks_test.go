@@ -217,3 +217,17 @@ func TestTaskRunIgnoresGrants(t *testing.T) {
 		t.Fatalf("task prompt granted write access: %#v", dirs)
 	}
 }
+
+func TestTaskEmptyAnswerReportsFailure(t *testing.T) {
+	svc, engine, sent := taskService(t, dailyNews)
+	engine.replyFor = func(opts grok.ReplyOptions) (grok.HeadlessResult, error) {
+		return grok.HeadlessResult{Text: "  \n", SessionID: opts.SessionID}, nil
+	}
+	addTask(t, svc, "9", dailyNews, "每天 09:00：看新闻", taskNow.Add(-10*time.Second))
+	svc.runDue(context.Background())
+	got := sent.wait(t, 1)
+	want := "⏰ 定时任务 #1：每天 09:00：看新闻\n\n处理失败：没有得到回复。"
+	if got[0] != want {
+		t.Fatalf("got %q, want %q", got[0], want)
+	}
+}

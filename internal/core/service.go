@@ -3,8 +3,10 @@ package core
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +16,9 @@ import (
 	"github.com/rshun/grok-bot/internal/sandbox"
 	"github.com/rshun/grok-bot/internal/store"
 )
+
+// emptyReplyText is shown when a turn finishes without any answer text.
+const emptyReplyText = "处理失败：没有得到回复。"
 
 // Engine is the Grok subscription surface used by the chat core.
 type Engine interface {
@@ -168,7 +173,7 @@ func (s *Service) dispatch(it item) {
 		reply = grok.UserFacing(err)
 	}
 	if strings.TrimSpace(reply) == "" {
-		reply = "处理失败：没有得到回复。"
+		reply = emptyReplyText
 	}
 	if view != nil {
 		// Finish falls back to new messages itself and logs its own failure; do not resend.
@@ -243,6 +248,11 @@ func (s *Service) chat(ctx context.Context, in platform.Inbound, onTool func(gro
 	reply, err := s.chatTurn(ctx, in, onTool)
 	if err != nil {
 		return "", err
+	}
+	// The single place that decides whether the turn produced anything to show. It runs
+	// before notes and the reminder are added around the reply, so they cannot hide an empty answer.
+	if strings.TrimSpace(reply) == "" {
+		reply = emptyReplyText
 	}
 	if len(notes) > 0 {
 		reply = strings.Join(notes, "\n") + "\n\n" + reply
@@ -319,8 +329,18 @@ func (s *Service) startSession(ctx context.Context, in platform.Inbound, opts gr
 
 func (s *Service) send(ctx context.Context, out platform.Replier, chatID, text string) {
 	if err := out.Send(ctx, chatID, text); err != nil {
-		slog.Error("send failed", "chat", chatID, "err", err)
+		slog.Error("send failed", "chat", chatID, "err", safeErr(err))
 	}
+}
+
+// safeErr renders an error for logs without any request URL. Platform HTTP clients return
+// *url.Error whose text embeds the request URL, and a Telegram URL contains the bot token.
+func safeErr(err error) string {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return urlErr.Op + ": " + urlErr.Err.Error()
+	}
+	return err.Error()
 }
 
 func parseCommand(text string) (cmd, arg string, ok bool) {

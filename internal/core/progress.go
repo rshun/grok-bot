@@ -18,6 +18,8 @@ const (
 	progressDetailMax = 80
 	// defaultProgressInterval keeps edits well under the platforms' rate limits.
 	defaultProgressInterval = 3 * time.Second
+	// progressCloseTimeout bounds the final edit or delete, which must outlive a cancelled turn.
+	progressCloseTimeout = 10 * time.Second
 )
 
 // progressKeys are the tool input fields that carry something worth showing, in priority order.
@@ -156,6 +158,8 @@ func (v *progressView) Show(ctx context.Context, text string) {
 func (v *progressView) Finish(ctx context.Context, text string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	ctx, cancel := detached(ctx)
+	defer cancel()
 	err := v.handle.Finish(ctx, text)
 	if err != nil {
 		slog.Warn("progress finish failed", "platform", v.platform)
@@ -163,10 +167,18 @@ func (v *progressView) Finish(ctx context.Context, text string) error {
 	return err
 }
 
+// detached returns a short-lived context that is not cancelled with the turn, so the progress
+// message is still closed when the bot shuts down mid-turn.
+func detached(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), progressCloseTimeout)
+}
+
 // Delete removes the progress message.
 func (v *progressView) Delete(ctx context.Context) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	ctx, cancel := detached(ctx)
+	defer cancel()
 	err := v.handle.Delete(ctx)
 	if err != nil {
 		slog.Warn("progress delete failed", "platform", v.platform)

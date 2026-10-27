@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -331,5 +333,53 @@ func TestScheduledTaskHasNoProgress(t *testing.T) {
 		if strings.HasPrefix(e, "start") || strings.HasPrefix(e, "finish") {
 			t.Fatalf("%#v", ev.snapshot())
 		}
+	}
+}
+
+func TestSafeErrHidesRequestURL(t *testing.T) {
+	err := &url.Error{
+		Op:  "Post",
+		URL: "https://api.telegram.org/botyour_token_here/sendMessage",
+		Err: errors.New("boom"),
+	}
+	for _, e := range []error{err, fmt.Errorf("send: %w", err)} {
+		got := safeErr(e)
+		if !strings.Contains(got, "boom") || strings.Contains(got, "your_token_here") || strings.Contains(got, "api.telegram.org/bot") {
+			t.Fatalf("%q", got)
+		}
+	}
+	if got := safeErr(errors.New("plain")); got != "plain" {
+		t.Fatalf("%q", got)
+	}
+}
+
+// ctxHandle records whether the context it received was already cancelled.
+type ctxHandle struct {
+	finishErr chan error
+	deleteErr chan error
+}
+
+func (ctxHandle) Update(context.Context, string) error { return nil }
+func (h ctxHandle) Finish(ctx context.Context, _ string) error {
+	h.finishErr <- ctx.Err()
+	return nil
+}
+func (h ctxHandle) Delete(ctx context.Context) error {
+	h.deleteErr <- ctx.Err()
+	return nil
+}
+
+func TestFinishAndDeleteSurviveCancelledTurn(t *testing.T) {
+	h := ctxHandle{finishErr: make(chan error, 1), deleteErr: make(chan error, 1)}
+	view := &progressView{handle: h, platform: "telegram", interval: time.Second}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_ = view.Finish(ctx, "x")
+	_ = view.Delete(ctx)
+	if err := <-h.finishErr; err != nil {
+		t.Fatalf("Finish got a cancelled context: %v", err)
+	}
+	if err := <-h.deleteErr; err != nil {
+		t.Fatalf("Delete got a cancelled context: %v", err)
 	}
 }

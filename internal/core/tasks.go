@@ -273,6 +273,9 @@ func (s *Service) runTask(ctx context.Context, t store.Task) string {
 		slog.Error("task run failed", "task", t.ID, "err", err)
 		return header + "\n\n" + grok.UserFacing(err)
 	}
+	if strings.TrimSpace(result.Text) == "" {
+		return header + "\n\n" + emptyReplyText
+	}
 	return header + "\n\n" + result.Text
 }
 
