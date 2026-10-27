@@ -2,7 +2,6 @@ package telegram
 
 import (
 	"context"
-	"fmt"
 	"strconv"
 	"strings"
 
@@ -79,24 +78,11 @@ func (r *messageReply) Send(ctx context.Context, chatID, text string) error {
 }
 
 func (b *Bot) send(ctx context.Context, chatID, text string, messageID int) error {
-	id, err := strconv.ParseInt(chatID, 10, 64)
-	if err != nil {
-		return fmt.Errorf("chat id: %w", err)
-	}
 	for _, chunk := range platform.Split(text, chunkLimit) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		params := tgbotapi.Params{
-			"chat_id":                  strconv.FormatInt(id, 10),
-			"text":                     chunk,
-			"disable_web_page_preview": "true",
-		}
-		if messageID > 0 {
-			// MakeRequest supports current Bot API fields without upgrading the SDK.
-			params["reply_parameters"] = fmt.Sprintf(`{"message_id":%d,"allow_sending_without_reply":true}`, messageID)
-		}
-		if _, err := b.api.MakeRequest("sendMessage", params); err != nil {
+		if _, err := b.sendOne(chatID, chunk, messageID); err != nil {
 			return err
 		}
 	}

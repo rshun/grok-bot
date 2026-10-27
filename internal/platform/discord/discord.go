@@ -201,21 +201,7 @@ func (b *Bot) send(ctx context.Context, chatID, text, messageID string) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		out := &discordgo.MessageSend{
-			Content:         chunk,
-			Flags:           discordgo.MessageFlagsSuppressEmbeds,
-			AllowedMentions: nobody(),
-		}
-		if messageID != "" {
-			failIfMissing := false
-			out.Reference = &discordgo.MessageReference{
-				MessageID:       messageID,
-				ChannelID:       chatID,
-				FailIfNotExists: &failIfMissing,
-			}
-		}
-		_, err := b.session.ChannelMessageSendComplex(chatID, out)
-		if err != nil {
+		if _, err := b.sendOne(ctx, chatID, chunk, messageID); err != nil {
 			return err
 		}
 	}
