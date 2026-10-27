@@ -89,6 +89,10 @@ type ReplyOptions struct {
 	WriteDirs []string
 	// JSONSchema asks for structured output with every tool closed.
 	JSONSchema string
+	// OnTool is called for each tool call as it streams in; chat turns only.
+	OnTool func(ToolUse)
+	// Env is appended to the grok process environment.
+	Env []string
 }
 
 func (c *Client) Reply(ctx context.Context, opts ReplyOptions) (HeadlessResult, error) {
@@ -107,8 +111,11 @@ func (c *Client) Reply(ctx context.Context, opts ReplyOptions) (HeadlessResult, 
 
 	args := replyArgs(c.Workspace, opts)
 	cmd := exec.CommandContext(ctx, c.Bin, args...)
-	cmd.Env = envWithoutUpdate()
+	cmd.Env = append(envWithoutUpdate(), opts.Env...)
 	cmd.Dir = c.Workspace
+	if opts.JSONSchema == "" {
+		return replyStream(ctx, cmd, opts)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -129,17 +136,50 @@ func (c *Client) Reply(ctx context.Context, opts ReplyOptions) (HeadlessResult, 
 	return result, nil
 }
 
+// replyStream runs a chat turn, reading the event stream while grok works.
+func replyStream(ctx context.Context, cmd *exec.Cmd, opts ReplyOptions) (HeadlessResult, error) {
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return HeadlessResult{}, err
+	}
+	if err := cmd.Start(); err != nil {
+		return HeadlessResult{}, err
+	}
+	result, parseErr := ParseStream(stdout, opts.OnTool)
+	// Drain what is left so grok never blocks on a full pipe before Wait.
+	_, _ = io.Copy(io.Discard, stdout)
+	runErr := cmd.Wait()
+	if parseErr != nil {
+		if ctx.Err() != nil {
+			return HeadlessResult{}, ctx.Err()
+		}
+		var reported *RunError
+		if errors.As(parseErr, &reported) {
+			return HeadlessResult{}, parseErr
+		}
+		return HeadlessResult{}, headlessFailure("", stderr.String(), parseErr, runErr)
+	}
+	if result.SessionID == "" {
+		result.SessionID = opts.SessionID
+	}
+	return result, nil
+}
+
 // replyArgs builds the grok command line for one chat turn.
 func replyArgs(workspace string, opts ReplyOptions) []string {
 	maxTurns := "8"
+	format := "streaming-messages-json"
 	if opts.JSONSchema != "" {
 		maxTurns = "2"
+		format = "json"
 	}
 	args := []string{
 		"--cwd", workspace,
 		"-p", opts.Prompt,
 		"-m", opts.Model,
-		"--output-format", "json",
+		"--output-format", format,
 		"--max-turns", maxTurns,
 		"--no-plan",
 		"--no-subagents",

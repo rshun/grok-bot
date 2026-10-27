@@ -163,6 +163,17 @@ func TestReplyArgsFiles(t *testing.T) {
 	}
 }
 
+func TestReplyArgsStreaming(t *testing.T) {
+	base := ReplyOptions{SessionID: "sess", NewSession: true, Model: "grok-4.7", Prompt: "hi"}
+	if got := argValue(t, replyArgs("/ws", base), "--output-format"); got != "streaming-messages-json" {
+		t.Fatalf("chat output format: %q", got)
+	}
+	base.JSONSchema = `{"type":"object"}`
+	if got := argValue(t, replyArgs("/ws", base), "--output-format"); got != "json" {
+		t.Fatalf("schema output format: %q", got)
+	}
+}
+
 func TestReplyArgsJSONSchema(t *testing.T) {
 	args := replyArgs("/ws", ReplyOptions{
 		SessionID: "sess", NewSession: true, Model: "grok-4.7", Prompt: "hi",
