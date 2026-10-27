@@ -39,6 +39,8 @@ type Service struct {
 	Location        *time.Location
 	TaskLimit       int
 	TaskMinInterval time.Duration
+	// ProgressInterval is the shortest gap between edits of a progress message; 0 means 3 seconds.
+	ProgressInterval time.Duration
 	// Now is the clock for scheduling; nil means time.Now.
 	Now func() time.Time
 
@@ -159,7 +161,8 @@ func (s *Service) dispatch(it item) {
 		s.send(ctx, it.out, it.in.ChatID, s.runTask(ctx, *it.task))
 		return
 	}
-	reply, err := s.answer(ctx, it.in)
+	view := s.startProgress(ctx, it)
+	reply, err := s.answer(ctx, it.in, view.onTool(ctx))
 	if err != nil {
 		slog.Error("chat turn failed", "chat", it.in.ChatID, "err", err)
 		reply = grok.UserFacing(err)
@@ -167,14 +170,19 @@ func (s *Service) dispatch(it item) {
 	if strings.TrimSpace(reply) == "" {
 		reply = "处理失败：没有得到回复。"
 	}
+	if view != nil {
+		// Finish falls back to new messages itself and logs its own failure; do not resend.
+		_ = view.Finish(ctx, reply)
+		return
+	}
 	s.send(ctx, it.out, it.in.ChatID, reply)
 }
 
-func (s *Service) answer(ctx context.Context, in platform.Inbound) (string, error) {
+func (s *Service) answer(ctx context.Context, in platform.Inbound, onTool func(grok.ToolUse)) (string, error) {
 	if cmd, arg, ok := parseCommand(in.Text); ok {
 		return s.command(ctx, in, cmd, arg)
 	}
-	return s.chat(ctx, in)
+	return s.chat(ctx, in, onTool)
 }
 
 func (s *Service) command(ctx context.Context, in platform.Inbound, cmd, arg string) (string, error) {
@@ -230,9 +238,9 @@ func (s *Service) modelCommand(ctx context.Context, in platform.Inbound, arg str
 
 // chat applies write grants from the message, runs the turn, and adds the
 // confirmations before the reply and the /reset reminder after it.
-func (s *Service) chat(ctx context.Context, in platform.Inbound) (string, error) {
+func (s *Service) chat(ctx context.Context, in platform.Inbound, onTool func(grok.ToolUse)) (string, error) {
 	notes := s.applyGrants(ctx, in.Text)
-	reply, err := s.chatTurn(ctx, in)
+	reply, err := s.chatTurn(ctx, in, onTool)
 	if err != nil {
 		return "", err
 	}
@@ -254,12 +262,12 @@ func (s *Service) needsReset(ctx context.Context, in platform.Inbound) bool {
 	return err == nil && chat.SessionID != "" && chat.Sandbox != sandbox.ProfileName
 }
 
-func (s *Service) chatTurn(ctx context.Context, in platform.Inbound) (string, error) {
+func (s *Service) chatTurn(ctx context.Context, in platform.Inbound, onTool func(grok.ToolUse)) (string, error) {
 	chat, err := s.Store.Chat(ctx, in.Platform, in.ChatID)
 	if err != nil {
 		return "", err
 	}
-	base := grok.ReplyOptions{Model: chat.Model, Prompt: in.Text, WebSearch: s.WebSearch}
+	base := grok.ReplyOptions{Model: chat.Model, Prompt: in.Text, WebSearch: s.WebSearch, OnTool: onTool}
 	if chat.SessionID == "" {
 		return s.startSession(ctx, in, base)
 	}
