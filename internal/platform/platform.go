@@ -28,3 +28,16 @@ type Replier interface {
 type Receipt interface {
 	MarkReceived(ctx context.Context, in Inbound) error
 }
+
+// Progress lets a replier show an editable "working" message for one inbound message.
+type Progress interface {
+	StartProgress(ctx context.Context, in Inbound, text string) (ProgressHandle, error)
+}
+
+// ProgressHandle controls one progress message. Core ends it with exactly one of Finish or Delete.
+type ProgressHandle interface {
+	Update(ctx context.Context, text string) error
+	// Finish 把进度消息改成第一段，其余段落新发并引用原消息。编辑失败时自己改为全部新发，只有新发也失败才返回错误。
+	Finish(ctx context.Context, text string) error
+	Delete(ctx context.Context) error
+}
