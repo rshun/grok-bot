@@ -128,9 +128,9 @@
   - `func ParseStream(r io.Reader, onTool func(ToolUse)) (HeadlessResult, error)`
   - `ReplyOptions` 新增字段 `OnTool func(ToolUse)`、`Env []string`（追加到 grok 进程环境）。
 
-- [ ] **Step 1: Write the failing tests**（`stream_test.go`，样例行用 P1 记录的真实形状）
-  - `TestParseStreamResult`：一行 assistant 文字 + 一行 `tool_use{name:"web_search"}` + result 行 → `Text` 等于 `result.result` 去掉首尾空白，`SessionID` 正确，`onTool` 被调用一次且 `Name=="web_search"`。
-  - `TestParseStreamError`：错误 result（`is_error:true`）或 `type:"error"` 行 → 返回 `*RunError`，`Message` 取错误文字。
+- [ ] **Step 1: Write the failing tests**（`stream_test.go`，样例行用 probe 文档 P1 记录的真实形状）
+  - `TestParseStreamResult`：init 行 + 一行 assistant（含 text 块和 `server_tool_use{name:"web_search",input:{query}}`）+ 一行 assistant（`tool_use{name:"use_tool",input:{tool_name,tool_input}}`）+ result 行 → `Text` 等于 `result.result` 去掉首尾空白，`SessionID` 等于 `session_id`，`onTool` 依次收到 `web_search`、`use_tool`。`tool_use` 和 `server_tool_use` 都要上报。
+  - `TestParseStreamError`：`subtype:"error_during_execution","is_error":true,"errors":["Couldn't set model ..."]` → 返回 `*RunError`，`Message` 取 `errors[0]`；`subtype:"error_max_turns"` → `*RunError`，`Message` 含 `max turns`；`type:"error"` 行 → `*RunError`，`Message` 取 `message`。
   - `TestParseStreamIgnoresUnknown`：中间夹杂未知 `type` 的行和非 JSON 行 → 不报错。
   - `TestParseStreamEmptyResult`：`result.result` 为空 → 返回 `Text==""`，**不报错**。
   - `TestParseStreamNoResult`：没有 result 行 → 返回错误。
@@ -293,7 +293,7 @@
   Expected: FAIL
 
 - [ ] **Step 3: Implement**
-  - JSON-RPC 只支持 `initialize`（回传客户端请求的 `protocolVersion`）、`notifications/*`、`ping`、`tools/list`、`tools/call`。
+  - JSON-RPC 只支持 `initialize`（回传客户端请求的 `protocolVersion`）、`notifications/*`、`ping`、`tools/list`、`tools/call`。grok 会先发 `server/discover`，其他未知方法也一样，一律回 `-32601 method not found`（加测试 `TestUnknownMethodIsMethodNotFound`）。
   - 令牌比较用 `crypto/subtle`。
   - 配置文件的 headers 写法以 P2 实测为准，采用原子写入（参照 `sandbox.Manager.write`）。
   - 工具描述用英文写给 Grok：
@@ -316,13 +316,17 @@
 - Consumes: Task 4 的 `actions.Server.Begin`、`actions.Turn`、`actions.WriteConfig`。
 - Produces:
   - `Service` 新增 `Actions *actions.Server`，nil 表示没有 MCP 通道。
-  - `ReplyOptions` 新增 `Actions bool`（提示词提到 react）。send_file 的提示随 `FileTools` 出现，见 Task 8。
+  - `ReplyOptions` 新增：
+    - `Actions bool`：本轮有 MCP 通道。`replyArgs` 据此加 `--trust`，否则 grok 不加载项目级 MCP（probe P2）。
+    - `React bool`：提示词提到 react。定时任务轮次为 false。
+    - send_file 的提示在 `Actions && FileTools` 时出现，见 Task 8。
   - `func (s *Service) beginTurn(in platform.Inbound, out platform.Replier, fileTools bool) (*actions.Turn, []string, func())`，返回本轮 Turn、要追加的 env 和结束函数。
 
 - [ ] **Step 1: Write the failing tests**
   - `TestChatTurnPassesTokenEnv`：`svc.Actions` 不为 nil 时，engine 收到的 `opts.Env` 有一项以 `GROKBOT_TURN_TOKEN=` 开头，且 `opts.Actions==true`；为 nil 时没有这一项，且 `Actions==false`。
   - `TestTokenEndsAfterTurn`：engine 在回调里记下令牌；轮次结束后用它请求 `Server` → 401。
-  - `client_test.go` 的 `TestSystemPromptActions`：`Actions` 为 true 时，提示词含 `react` 和 `[[NO_REPLY]]`；为 false 时都不含。
+  - `client_test.go` 的 `TestReplyArgsTrust`：`Actions` 为 true 时参数含 `--trust`，为 false 或有 `JSONSchema` 时不含。
+  - `client_test.go` 的 `TestSystemPromptActions`：`React` 为 true 时，提示词含 `grokbot__react` 和 `[[NO_REPLY]]`；为 false 时都不含。
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -330,7 +334,7 @@
   Expected: FAIL
 
 - [ ] **Step 3: Implement**
-  - 提示词追加一句（工具全名在 Task 6 Step 1 实测后再改）：`" You can react to the user's message with one emoji using the grokbot react tool. If a reaction alone is enough, call it and reply with exactly [[NO_REPLY]]."`
+  - 提示词追加一句：`" You can react to the user's message with one emoji using the MCP tool grokbot__react. If a reaction alone is enough, call it and reply with exactly [[NO_REPLY]]."`
   - main：
     - `actions.Listen("127.0.0.1:0")`，然后 `WriteConfig(filepath.Join(workspace, ".grok", "config.toml"), port)`。
     - 返回 `ErrUnmanaged` 时记一条 `slog.Warn`，并让 `svc.Actions = nil`。
@@ -356,7 +360,7 @@
   - `type Reactor interface { React(ctx context.Context, in Inbound, emoji string) error }`，由两个平台的 `messageReply` 实现。
   - `const noReply = "[[NO_REPLY]]"`（core）。
 
-- [ ] **Step 1: P4 实测工具全名**：用本机 grok 在 workspace 下跑一轮"列出你能用的 grokbot 工具"，确认 Grok 能看到 `react`。把实际全名写进 probe 文档，再相应修改 Task 5 的提示词。
+- [ ] **Step 1: 用真实服务复测**：probe 已确认全名是 `grokbot__react`。在 Task 4、5 完成后，本机用真实 bot 的 MCP 服务跑一轮（`--trust`，cwd 为临时 workspace），确认两点：`server/discover` 回 `-32601` 后 grok 仍能 `initialize`；Grok 能找到并调用 `grokbot__react`。把结果补进 probe 文档。
 
 - [ ] **Step 2: Write the failing tests**
   - Telegram `TestTelegramReactionNormalizes`：
@@ -467,7 +471,7 @@
   - Telegram 用 `tgbotapi.NewPhoto` / `NewDocument` 加 `tgbotapi.FilePath`，设置 `ReplyToMessageID`、`AllowSendingWithoutReply`、`Caption`。
   - Discord 用 `MessageSend.Files`，`Reference` 的写法同现有 `send`。
   - `beginTurn` 在 `fileTools` 为真且 `out`（或任务的 `Senders[platform]`）实现了 `FileSender` 时，设置 `Turn.CheckFile`：先调 `CheckSendable`，再比较 `FileLimit()`。
-  - 提示词：`FileTools` 为真且有 MCP 通道时，追加 `" You can send a file to the user with the grokbot send_file tool; path must be absolute."`（全名以 P4 为准）。
+  - 提示词：`Actions && FileTools` 时追加 `" You can send a file to the user with the MCP tool grokbot__send_file; path must be absolute."`
 
 - [ ] **Step 4: Run tests to verify they pass** — 同 Step 2，Expected: PASS
 
@@ -498,6 +502,7 @@
   // grok
   type Image struct { MIME string; Data []byte }
   // ReplyOptions 新增 Images []Image
+  // Client 新增 InboxDir string（main 设为 DATA_DIR/inbox，权限 0700）
   ```
   `TextMessage` 的含义改为"有文字或有图片"。
 
@@ -513,7 +518,9 @@
     - `TestSkippedAttachmentNote`：`Skipped==true` → 回答前面加 `其余附件暂不支持。`
     - `TestUnsupportedOnly`：只有语音 → 回复 `目前只处理文字和图片。`
     - `TestCaptionGrantApplies`：caption 为 `允许写入 <dir>` → 授权生效。
-  - grok `TestReplyArgsImages`：有 `Images` 时，按 P3 实测可用的方式组装参数（`--prompt-json` 或 `--prompt-file`），不再出现 `-p`。
+  - grok `TestPromptBlocks`：文字加两张图 → JSON 数组依次为 `{"type":"text","text":...}`、`{"type":"image","mimeType":"image/png","data":"<base64>"}`、第二个图片块。注意是 ACP 字段名 `mimeType`/`data`，不是 Anthropic 的 `source`。
+  - grok `TestReplyArgsImages`：有 `Images` 时参数里有 `--prompt-file <InboxDir 下的文件>`，没有 `-p`；没有图片时仍用 `-p`。
+  - grok `TestPromptFileRemoved`：`Reply` 返回后（成功或失败），临时文件都不在了。
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -521,7 +528,7 @@
   Expected: FAIL
 
 - [ ] **Step 3: Implement**
-  - 图片块的格式完全按 P3 的记录。如果 P3 只能用 `--prompt-file`，临时文件写在 `DATA_DIR/inbox/`，权限 0600，grok 进程结束后由 bot 删除，删除失败只记日志。
+  - 图片走 `--prompt-file`（probe P3）。用 `os.CreateTemp(InboxDir, "prompt-*.json")` 建文件，权限 0600，写入 ACP 内容块数组。grok 进程结束后用 `defer os.Remove` 删除，删除失败只记日志。这是 bot 自己的临时文件，不涉及用户文件。
   - Discord 下载用带 ctx 的 `http.Client`，用 `io.LimitReader` 限制在 10MB+1。
 
 - [ ] **Step 4: Run tests to verify they pass** — 同 Step 2，Expected: PASS
@@ -570,6 +577,7 @@
   - 把"目前只处理文字"改为"文字和图片"。
   - 新增"进度消息""表情回应""发送文件""接收图片"四节，说明规则、上限、发文件和沙箱读取规则一致、文件功能关闭时不能发文件。
   - 说明 `DATA_DIR/workspace/.grok/config.toml` 由 bot 生成；已有的非 bot 文件不会被覆盖，此时表情和发文件不可用。
+  - 说明 bot 调用 grok 时对 `DATA_DIR/workspace` 使用 `--trust`。不在沙箱里运行时，`~/.grok/trusted_folders.toml` 里会多出这个目录的一条信任记录。
   - 把设计第 6 节的 8 项手动验证加进"服务器实测清单"。
   - 回滚说明：不改数据库，恢复旧程序即可。配置文件可保留；如果要移除，由管理员确认后手动处理。
 
