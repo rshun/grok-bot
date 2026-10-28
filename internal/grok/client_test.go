@@ -2,10 +2,14 @@ package grok
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -297,5 +301,113 @@ func TestSystemPromptSendFile(t *testing.T) {
 	schema.JSONSchema = `{"type":"object"}`
 	if strings.Contains(systemPromptFor(schema), "send_file") {
 		t.Fatal("send_file mentioned in a schema call")
+	}
+}
+
+func TestPromptBlocks(t *testing.T) {
+	body, err := promptBlocks("look", []Image{
+		{MIME: "image/png", Data: []byte("one")},
+		{MIME: "image/jpeg", Data: []byte("two")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"type":"text","text":"look"},` +
+		`{"type":"image","mimeType":"image/png","data":"` + base64.StdEncoding.EncodeToString([]byte("one")) + `"},` +
+		`{"type":"image","mimeType":"image/jpeg","data":"` + base64.StdEncoding.EncodeToString([]byte("two")) + `"}]`
+	if string(body) != want {
+		t.Fatalf("got %s, want %s", body, want)
+	}
+	if strings.Contains(string(body), `"source"`) {
+		t.Fatal("image block must use ACP mimeType/data, not an Anthropic source")
+	}
+}
+
+func TestReplyArgsImages(t *testing.T) {
+	inbox := t.TempDir()
+	c := &Client{Workspace: "/ws", InboxDir: inbox}
+	opts := ReplyOptions{SessionID: "s", Model: "grok-4.7", Prompt: "hi", Images: []Image{{MIME: "image/png", Data: []byte("png")}}}
+	args, cleanup, err := c.buildArgs(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	file := argValue(t, args, "--prompt-file")
+	if filepath.Dir(file) != inbox {
+		t.Fatalf("prompt file %q is not in the inbox %q", file, inbox)
+	}
+	for _, arg := range args {
+		if arg == "-p" {
+			t.Fatalf("-p must not be used with images: %q", args)
+		}
+	}
+	if argValue(t, args, "--cwd") != "/ws" {
+		t.Fatalf("lost other args: %q", args)
+	}
+	hasVerbatim := false
+	for _, arg := range args {
+		hasVerbatim = hasVerbatim || arg == "--verbatim"
+	}
+	if !hasVerbatim {
+		t.Fatalf("--verbatim missing: %q", args)
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blocks []map[string]string
+	if err := json.Unmarshal(data, &blocks); err != nil || len(blocks) != 2 || blocks[0]["text"] != "hi" || blocks[1]["mimeType"] != "image/png" {
+		t.Fatalf("prompt file: %s (%v)", data, err)
+	}
+	if info, err := os.Stat(file); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
+		t.Fatalf("prompt file mode: %v %v", info, err)
+	}
+	cleanup()
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatalf("prompt file still there after cleanup: %v", err)
+	}
+	cleanup() // a second call is harmless
+
+	// Without pictures the prompt stays on the command line and nothing is written.
+	opts.Images = nil
+	args, cleanup, err = c.buildArgs(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanup()
+	if argValue(t, args, "-p") != "hi" {
+		t.Fatalf("got %q", args)
+	}
+	for _, arg := range args {
+		if arg == "--prompt-file" {
+			t.Fatalf("--prompt-file without images: %q", args)
+		}
+	}
+	if left, _ := os.ReadDir(inbox); len(left) != 0 {
+		t.Fatalf("inbox not empty: %v", left)
+	}
+
+	opts.Images = []Image{{MIME: "image/png", Data: []byte("png")}}
+	if _, _, err := (&Client{Workspace: "/ws"}).buildArgs(opts); err == nil {
+		t.Fatal("images without an inbox dir were accepted")
+	}
+}
+
+func TestPromptFileRemoved(t *testing.T) {
+	opts := ReplyOptions{SessionID: "s", Model: "grok-4.7", Prompt: "hi", Images: []Image{{MIME: "image/png", Data: []byte("png")}}}
+	for name, bin := range map[string]string{
+		"start fails": filepath.Join(t.TempDir(), "no-such-grok"),
+		"exits badly": os.Args[0], // the test binary rejects grok's flags and exits non-zero
+	} {
+		t.Run(name, func(t *testing.T) {
+			inbox := t.TempDir()
+			c := &Client{Bin: bin, Workspace: t.TempDir(), InboxDir: inbox}
+			if _, err := c.Reply(context.Background(), opts); err == nil {
+				t.Fatal("expected an error")
+			}
+			if left, _ := os.ReadDir(inbox); len(left) != 0 {
+				t.Fatalf("prompt file left behind: %v", left)
+			}
+		})
 	}
 }

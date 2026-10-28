@@ -80,21 +80,27 @@ func (s *Service) Handle(ctx context.Context, in platform.Inbound, out platform.
 		return
 	}
 	if !in.TextMessage {
-		s.send(ctx, out, in.ChatID, "目前只处理文字。")
+		s.send(ctx, out, in.ChatID, unsupportedText)
 		return
 	}
 	text := strings.TrimSpace(in.Text)
-	if text == "" {
+	if text == "" && len(in.Images) == 0 {
 		return
 	}
 	in.Text = text
+	limitImages(&in)
+	// Nothing is downloaded yet: the declared size is enough to refuse an image.
+	if oversize(in.Images) {
+		s.send(ctx, out, in.ChatID, imageTooLargeText)
+		return
+	}
 	lane := s.lane(in.Platform, in.ChatID)
 	ahead, ok := lane.reserve(s.limit())
 	if !ok {
 		s.send(ctx, out, in.ChatID, "前面的消息还在处理，这条先放不下了。等回复后再发。")
 		return
 	}
-	if _, _, command := parseCommand(in.Text); !command {
+	if _, _, command := parseInboundCommand(in); !command {
 		if receipt, ok := out.(platform.Receipt); ok {
 			if err := receipt.MarkReceived(ctx, in); err != nil {
 				// A missing reaction or typing indicator must not prevent the reply.
@@ -201,11 +207,15 @@ func (s *Service) dispatch(it item) {
 // answer returns the text to show and the files to send after it. quiet means the turn was
 // answered by a reaction alone, so an empty text is not a failure.
 func (s *Service) answer(ctx context.Context, in platform.Inbound, out platform.Replier, onTool func(grok.ToolUse)) (text string, quiet bool, files []actions.File, err error) {
-	if cmd, arg, ok := parseCommand(in.Text); ok {
+	if cmd, arg, ok := parseInboundCommand(in); ok {
 		text, err = s.command(ctx, in, cmd, arg)
 		return text, false, nil, err
 	}
-	return s.chat(ctx, in, out, onTool)
+	images, failure := loadImages(ctx, in)
+	if failure != "" {
+		return failure, false, nil, nil
+	}
+	return s.chat(ctx, in, out, images, onTool)
 }
 
 func (s *Service) command(ctx context.Context, in platform.Inbound, cmd, arg string) (string, error) {
@@ -263,9 +273,12 @@ func (s *Service) modelCommand(ctx context.Context, in platform.Inbound, arg str
 // confirmations before the reply and the /reset reminder after it.
 // quiet is true when Grok reacted and had nothing to add: reply then holds only the
 // confirmations (a grant must always be confirmed), which may be empty.
-func (s *Service) chat(ctx context.Context, in platform.Inbound, out platform.Replier, onTool func(grok.ToolUse)) (reply string, quiet bool, files []actions.File, err error) {
+func (s *Service) chat(ctx context.Context, in platform.Inbound, out platform.Replier, images []grok.Image, onTool func(grok.ToolUse)) (reply string, quiet bool, files []actions.File, err error) {
 	notes := s.applyGrants(ctx, in.Text)
-	res, err := s.chatTurn(ctx, in, out, onTool)
+	if in.Skipped {
+		notes = append([]string{skippedNote}, notes...)
+	}
+	res, err := s.chatTurn(ctx, in, out, images, onTool)
 	if err != nil {
 		return "", false, nil, err
 	}
@@ -318,12 +331,16 @@ type chatResult struct {
 	rebuilt bool           // the answer came from a new session after the old one went missing
 }
 
-func (s *Service) chatTurn(ctx context.Context, in platform.Inbound, out platform.Replier, onTool func(grok.ToolUse)) (chatResult, error) {
+func (s *Service) chatTurn(ctx context.Context, in platform.Inbound, out platform.Replier, images []grok.Image, onTool func(grok.ToolUse)) (chatResult, error) {
 	chat, err := s.Store.Chat(ctx, in.Platform, in.ChatID)
 	if err != nil {
 		return chatResult{}, err
 	}
-	base := grok.ReplyOptions{Model: chat.Model, Prompt: in.Text, WebSearch: s.WebSearch, OnTool: onTool}
+	// The images stay in base so a rebuilt session gets them again.
+	base := grok.ReplyOptions{Model: chat.Model, Prompt: in.Text, WebSearch: s.WebSearch, OnTool: onTool, Images: images}
+	if len(images) > 0 {
+		base.Prompt = imagePrompt(in.Text, len(images))
+	}
 	if chat.SessionID == "" {
 		return s.startSession(ctx, in, out, base)
 	}

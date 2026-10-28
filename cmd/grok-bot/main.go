@@ -36,6 +36,12 @@ func main() {
 		slog.Error("data dir", "err", err)
 		os.Exit(1)
 	}
+	// Prompt files of turns with images live here only while grok runs; only the bot may read them.
+	inbox := filepath.Join(cfg.DataDir, "inbox")
+	if err := os.MkdirAll(inbox, 0o700); err != nil {
+		slog.Error("inbox dir", "err", err)
+		os.Exit(1)
+	}
 	db, err := store.Open(cfg.DataDir, cfg.DefaultModel)
 	if err != nil {
 		slog.Error("store", "err", err)
@@ -70,6 +76,7 @@ func main() {
 		BillingURL: cfg.BillingURL,
 		UserURL:    cfg.UserURL,
 		Timeout:    cfg.GrokTimeout,
+		InboxDir:   inbox,
 	}
 	// The local MCP server lets grok act on the chat during a turn. Chat keeps working without it.
 	// actionsForSvc stays nil when the server cannot listen or grok cannot be pointed at it.

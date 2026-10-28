@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"io"
 )
 
@@ -17,9 +18,49 @@ type Inbound struct {
 	ChatID    string
 	MessageID string
 	UserID    string
-	Text      string
-	// TextMessage is false for photos, voice notes, and other unsupported payloads.
+	// Text is the message text, or the caption when the message carries images.
+	Text string
+	// TextMessage is true when the message has text or images; it is false for voice notes and
+	// other payloads the bot cannot use.
 	TextMessage bool
+	// Images are the pictures of the message, at most MaxImages.
+	Images []Image
+	// Skipped is true when the message also carried attachments that are not images, or more
+	// images than MaxImages.
+	Skipped bool
+}
+
+const (
+	// MaxImages is the most images taken from one message; the rest count as skipped.
+	MaxImages = 10
+	// MaxImageBytes is the largest single image the bot accepts.
+	MaxImageBytes = 10 << 20
+)
+
+// ErrImageTooLarge is returned by an Image Load when the picture is over MaxImageBytes.
+var ErrImageTooLarge = errors.New("image too large")
+
+// Image is a picture attached to a message. Nothing is downloaded until Load is called, and
+// the caller calls it only for messages from allowed users.
+type Image struct {
+	MIME, Name string
+	// Size is the size the platform declared, 0 when unknown.
+	Size int64
+	// Load downloads the picture. Its errors never contain the download URL, which can hold a
+	// bot token, so they are safe to log.
+	Load func(ctx context.Context) ([]byte, error)
+}
+
+// ReadImage reads a downloaded picture, stopping one byte after the limit.
+func ReadImage(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, MaxImageBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > MaxImageBytes {
+		return nil, ErrImageTooLarge
+	}
+	return data, nil
 }
 
 // Replier sends a message back to the chat that produced an inbound message.

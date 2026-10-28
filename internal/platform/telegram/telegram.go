@@ -2,8 +2,6 @@ package telegram
 
 import (
 	"context"
-	"strconv"
-	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -48,17 +46,7 @@ func (b *Bot) Run(ctx context.Context, handler func(context.Context, platform.In
 		if msg.Chat.Type != "private" {
 			continue
 		}
-		text := strings.TrimSpace(msg.Text)
-		media := msg.Photo != nil || msg.Voice != nil || msg.Audio != nil || msg.Video != nil || msg.Document != nil || msg.Sticker != nil || msg.VideoNote != nil
-		in := platform.Inbound{
-			Platform:    platform.Telegram,
-			ChatID:      strconv.FormatInt(msg.Chat.ID, 10),
-			MessageID:   strconv.Itoa(msg.MessageID),
-			UserID:      strconv.FormatInt(msg.From.ID, 10),
-			Text:        text,
-			TextMessage: text != "" && !media,
-		}
-		handler(ctx, in, &messageReply{Bot: b, messageID: msg.MessageID})
+		handler(ctx, b.inbound(msg), &messageReply{Bot: b, messageID: msg.MessageID})
 	}
 	return ctx.Err()
 }

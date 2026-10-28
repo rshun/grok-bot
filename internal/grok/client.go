@@ -3,13 +3,16 @@ package grok
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -76,6 +79,14 @@ type Client struct {
 	UserURL    string
 	Timeout    time.Duration
 	HTTP       *http.Client
+	// InboxDir holds the temporary prompt files of turns that carry images.
+	InboxDir string
+}
+
+// Image is one picture sent with the user's message.
+type Image struct {
+	MIME string
+	Data []byte
 }
 
 // ReplyOptions is one turn of a chat session.
@@ -103,6 +114,8 @@ type ReplyOptions struct {
 	React bool
 	// SendFile names the send_file tool in the system prompt.
 	SendFile bool
+	// Images are sent together with Prompt; chat turns only.
+	Images []Image
 }
 
 func (c *Client) Reply(ctx context.Context, opts ReplyOptions) (HeadlessResult, error) {
@@ -119,7 +132,12 @@ func (c *Client) Reply(ctx context.Context, opts ReplyOptions) (HeadlessResult, 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	args := replyArgs(c.Workspace, opts)
+	args, cleanup, err := c.buildArgs(opts)
+	if err != nil {
+		return HeadlessResult{}, err
+	}
+	// The prompt file holds the user's pictures, so it goes as soon as the grok process is over.
+	defer cleanup()
 	cmd := exec.CommandContext(ctx, c.Bin, args...)
 	cmd.Env = append(envWithoutUpdate(), opts.Env...)
 	cmd.Dir = c.Workspace
@@ -180,8 +198,65 @@ func replyStream(ctx context.Context, cmd *exec.Cmd, opts ReplyOptions) (Headles
 	return result, nil
 }
 
+// buildArgs builds the command line for one turn. With images the prompt goes through a temporary
+// file in InboxDir (a command line cannot hold them); cleanup removes that file and is always safe to call.
+func (c *Client) buildArgs(opts ReplyOptions) (args []string, cleanup func(), err error) {
+	if len(opts.Images) == 0 {
+		return replyArgs(c.Workspace, opts), func() {}, nil
+	}
+	if c.InboxDir == "" {
+		return nil, nil, fmt.Errorf("inbox dir is not set")
+	}
+	body, err := promptBlocks(opts.Prompt, opts.Images)
+	if err != nil {
+		return nil, nil, err
+	}
+	// CreateTemp makes the file readable by its owner only.
+	f, err := os.CreateTemp(c.InboxDir, "prompt-*.json")
+	if err != nil {
+		return nil, nil, err
+	}
+	name := f.Name()
+	cleanup = func() {
+		if err := os.Remove(name); err != nil && !os.IsNotExist(err) {
+			// Only the file name is logged: it is the bot's own name and holds no secret.
+			slog.Warn("prompt file not removed", "file", filepath.Base(name))
+		}
+	}
+	_, writeErr := f.Write(body)
+	if closeErr := f.Close(); writeErr == nil {
+		writeErr = closeErr
+	}
+	if writeErr != nil {
+		cleanup()
+		return nil, nil, writeErr
+	}
+	return replyArgsFile(c.Workspace, opts, name), cleanup, nil
+}
+
+// promptBlocks renders the prompt and pictures as the ACP content block array that
+// --prompt-file takes: a text block, then one image block per picture.
+func promptBlocks(prompt string, images []Image) ([]byte, error) {
+	type block struct {
+		Type     string `json:"type"`
+		Text     string `json:"text,omitempty"`
+		MIMEType string `json:"mimeType,omitempty"`
+		Data     string `json:"data,omitempty"`
+	}
+	blocks := []block{{Type: "text", Text: prompt}}
+	for _, img := range images {
+		blocks = append(blocks, block{Type: "image", MIMEType: img.MIME, Data: base64.StdEncoding.EncodeToString(img.Data)})
+	}
+	return json.Marshal(blocks)
+}
+
 // replyArgs builds the grok command line for one chat turn.
 func replyArgs(workspace string, opts ReplyOptions) []string {
+	return replyArgsFile(workspace, opts, "")
+}
+
+// replyArgsFile is replyArgs with the prompt read from promptFile when that is set.
+func replyArgsFile(workspace string, opts ReplyOptions, promptFile string) []string {
 	maxTurns := "8"
 	format := "streaming-messages-json"
 	if opts.JSONSchema != "" {
@@ -190,12 +265,16 @@ func replyArgs(workspace string, opts ReplyOptions) []string {
 	}
 	args := []string{
 		"--cwd", workspace,
-		"-p", opts.Prompt,
 		"-m", opts.Model,
 		"--output-format", format,
 		"--max-turns", maxTurns,
 		"--no-plan",
 		"--no-subagents",
+	}
+	if promptFile != "" {
+		args = append(args, "--prompt-file", promptFile)
+	} else {
+		args = append(args, "-p", opts.Prompt)
 	}
 	if !opts.WebSearch || opts.JSONSchema != "" {
 		args = append(args, "--disable-web-search")

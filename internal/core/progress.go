@@ -107,7 +107,7 @@ func (s *Service) startProgress(ctx context.Context, it item) *progressView {
 	if it.task != nil {
 		return nil
 	}
-	if _, _, command := parseCommand(it.in.Text); command {
+	if _, _, command := parseInboundCommand(it.in); command {
 		return nil
 	}
 	progress, ok := it.out.(platform.Progress)
