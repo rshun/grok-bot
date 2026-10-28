@@ -283,7 +283,7 @@ func TestSystemPromptActions(t *testing.T) {
 }
 
 func TestSystemPromptSendFile(t *testing.T) {
-	const sentence = " You can send a file to the user with the MCP tool grokbot__send_file; path must be absolute."
+	const sentence = " You can send a file to the user with the MCP tool grokbot__send_file; path must be absolute. When you send a file, also reply with one short line of text."
 	base := ReplyOptions{SessionID: "sess", Model: "grok-4.7", Prompt: "hi", Actions: true, FileTools: true}
 	if strings.Contains(systemPromptFor(base), "send_file") {
 		t.Fatal("send_file mentioned while off")

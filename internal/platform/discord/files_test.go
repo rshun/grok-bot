@@ -103,7 +103,7 @@ func TestSendFileOpenFailure(t *testing.T) {
 
 func TestDiscordFileSenderLimits(t *testing.T) {
 	var _ platform.FileSender = &messageReply{Bot: &Bot{}}
-	if got := (&Bot{}).FileLimit(); got != 25<<20 {
+	if got := (&Bot{}).FileLimit(); got != 10<<20 {
 		t.Fatalf("limit %d", got)
 	}
 }

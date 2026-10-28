@@ -24,7 +24,7 @@ const promptFiles = " You may read any file the system lets you read. You may wr
 
 const promptReact = " You can react to the user's message with one emoji using the MCP tool grokbot__react. If a reaction alone is enough, call it and reply with exactly [[NO_REPLY]]."
 
-const promptSendFile = " You can send a file to the user with the MCP tool grokbot__send_file; path must be absolute."
+const promptSendFile = " You can send a file to the user with the MCP tool grokbot__send_file; path must be absolute. When you send a file, also reply with one short line of text."
 
 const promptSchema = "Convert the user's scheduling request into JSON that matches the schema. Do not call tools."
 

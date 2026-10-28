@@ -243,3 +243,27 @@ func TestOpenSendableRefuses(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckSendableDenyPatternsMatchDirectoryNames(t *testing.T) {
+	p := testPolicy(t)
+	refused := []string{"/x/.env/secret", "/x/keys.pem/a", "/x/.ENV/a", "/x/Keys.PEM/deep/a.txt"}
+	for _, path := range refused {
+		path = filepath.FromSlash(path)
+		if !p.denied(filepath.Clean(path)) {
+			t.Errorf("%s not denied", path)
+		}
+	}
+	allowed := []string{"/x/.envrc/a", "/x/a.pem.txt", "/x/env/a"}
+	for _, path := range allowed {
+		path = filepath.FromSlash(path)
+		if p.denied(filepath.Clean(path)) {
+			t.Errorf("%s denied", path)
+		}
+	}
+	// End to end, through a real directory with such a name.
+	dir := filepath.Join(t.TempDir(), "keys.pem")
+	writeFile(t, filepath.Join(dir, "a.txt"), "x")
+	if _, _, err := p.CheckSendable(filepath.Join(dir, "a.txt")); err == nil {
+		t.Fatal("file inside keys.pem directory accepted")
+	}
+}

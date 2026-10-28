@@ -390,3 +390,48 @@ func TestTaskSendsFilesAfterResult(t *testing.T) {
 		t.Fatalf("got %s, want %s", got, want)
 	}
 }
+
+// growOut appends to the file after the platform has opened it, the way a
+// process that keeps writing would.
+type growOut struct {
+	filePlain
+	path string
+}
+
+func (g growOut) SendFile(_ context.Context, _, replyTo string, file platform.OutFile) error {
+	r, size, err := file.Open()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	f, err := os.OpenFile(g.path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString("-more-bytes")
+	f.Close()
+	if err != nil {
+		return err
+	}
+	data, _ := io.ReadAll(r)
+	g.ev.add(fmt.Sprintf("file:%s|%s|%d", data, replyTo, size))
+	return nil
+}
+
+func TestSendFileReadsOnlyTheCheckedSize(t *testing.T) {
+	svc, engine, ts := grantService(t)
+	path := writeTemp(t, "grow.txt", "one")
+	engine.replyFor = func(opts grok.ReplyOptions) (grok.HeadlessResult, error) {
+		callSendFile(t, ts, tokenFrom(t, opts.Env), path, "")
+		return grok.HeadlessResult{Text: "好了", SessionID: opts.SessionID}, nil
+	}
+	ev := &progressEvents{}
+	out := growOut{filePlain: filePlain{reactingPlain: reactingPlain{ev: ev}, limit: 1 << 20}, path: path}
+	handleMessage(svc, out, "发我")
+	ev.waitFor(t, 3)
+	time.Sleep(50 * time.Millisecond)
+	want := "receipt|send:好了|file:one|5|3"
+	if got := joined(ev.snapshot()); got != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+}

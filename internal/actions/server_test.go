@@ -366,8 +366,9 @@ func TestUnavailableToolIsError(t *testing.T) {
 	s, ts := newTestServer(t)
 	env, end := s.Begin(&Turn{React: okReact})
 	defer end()
-	if out := call(t, ts, tokenOf(t, env), "send_file", `{"path":"/f"}`); !out.IsError {
-		t.Fatalf("send_file without CheckFile succeeded: %+v", out)
+	out := call(t, ts, tokenOf(t, env), "send_file", `{"path":"/f"}`)
+	if !out.IsError || len(out.Content) != 1 || out.Content[0].Text != "文件功能当前不可用。" {
+		t.Fatalf("send_file without CheckFile = %+v, want the unavailable text", out)
 	}
 }
 

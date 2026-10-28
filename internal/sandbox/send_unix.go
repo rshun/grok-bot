@@ -11,9 +11,10 @@ import (
 )
 
 // openNoBlock opens a file for reading without waiting on a FIFO or device;
-// regular files ignore the flag.
+// regular files ignore the flag. It never follows a symlink in the last component:
+// callers pass a path from EvalSymlinks, so a link there means a swap.
 func openNoBlock(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 }
 
 // linkCount returns how many names the file has; more than one means a hard

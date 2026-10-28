@@ -103,10 +103,11 @@ func sendReadError(err error) error {
 
 // denied reports whether path, or any directory above it, is on the deny list,
 // or lies in a kernel directory (see kernelDirs).
+// A "**/" pattern matches the file name and every directory name above it, so
+// files inside a directory called ".env" or "keys.pem" are refused too.
 // Names are compared ignoring case, because macOS and Windows treat ".ENV" and
 // ".env" as one file; being stricter than the sandbox costs nothing here.
 func (p Policy) denied(path string) bool {
-	base := strings.ToLower(filepath.Base(path))
 	for _, dir := range kernelDirs {
 		if within(path, dir) {
 			return true
@@ -115,7 +116,7 @@ func (p Policy) denied(path string) bool {
 	var targetInfos []os.FileInfo
 	for _, entry := range p.Deny() {
 		if pattern, ok := strings.CutPrefix(entry, anywhere); ok {
-			if match, err := filepath.Match(strings.ToLower(pattern), base); err != nil || match {
+			if nameMatches(strings.ToLower(pattern), path) {
 				return true
 			}
 			continue
@@ -144,4 +145,19 @@ func (p Policy) denied(path string) bool {
 		cur = parent
 	}
 	return false
+}
+
+// nameMatches reports whether pattern (lower case) matches the last element of
+// path or the name of any directory above it, ignoring case.
+func nameMatches(pattern, path string) bool {
+	for cur := path; ; {
+		parent := filepath.Dir(cur)
+		if match, err := filepath.Match(pattern, strings.ToLower(filepath.Base(cur))); err != nil || match {
+			return true
+		}
+		if parent == cur {
+			return false
+		}
+		cur = parent
+	}
 }

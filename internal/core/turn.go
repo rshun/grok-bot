@@ -108,7 +108,8 @@ func (s *Service) flushFiles(ctx context.Context, out platform.Replier, chatID, 
 					r.Close()
 					return nil, 0, errors.New(errTooBig)
 				}
-				return r, size, nil
+				// A file that grows after the check is cut at the size that was checked.
+				return limited{Reader: io.LimitReader(r, size), Closer: r}, size, nil
 			},
 		}
 		if err := sender.SendFile(ctx, chatID, replyTo, file); err != nil {
@@ -125,4 +126,10 @@ func clipCaption(caption string) string {
 		return strings.TrimSpace(string(runes[:maxCaption]))
 	}
 	return caption
+}
+
+// limited reads at most the bytes its Reader allows and closes the file behind it.
+type limited struct {
+	io.Reader
+	io.Closer
 }

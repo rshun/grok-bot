@@ -349,6 +349,8 @@ func callTool(ctx context.Context, t *Turn, name string, args json.RawMessage) m
 		}
 		t.files = append(t.files, file)
 		return toolResult("Queued "+file.Name+" for sending.", false)
+	case name == "send_file":
+		return toolResult("文件功能当前不可用。", true)
 	default:
 		return toolResult("unknown tool", true)
 	}

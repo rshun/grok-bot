@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -52,4 +53,24 @@ func TestSendableRefusesFIFOWithoutHanging(t *testing.T) {
 		}
 		return err
 	})
+}
+
+func TestOpenNoBlockRefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	writeFile(t, target, "hello")
+	link := filepath.Join(dir, "link.txt")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	f, err := openNoBlock(link)
+	if err == nil {
+		f.Close()
+		t.Fatal("openNoBlock followed a symlink")
+	}
+	f, err = openNoBlock(target)
+	if err != nil {
+		t.Fatalf("regular file refused: %v", err)
+	}
+	f.Close()
 }
