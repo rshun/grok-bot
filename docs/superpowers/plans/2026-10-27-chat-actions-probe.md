@@ -64,3 +64,12 @@
 3. （可选）有 stdio MCP 时，子进程环境里是否带有 `GROKBOT_TURN_TOKEN`。
 
 结果：_待补_
+
+## P4 复测：真实 MCP 服务（2026-10-28，本机 Windows）
+
+用 `internal/actions` 的真实服务、bot 写出的 `workspace/.grok/config.toml` 和 `--trust` 跑本机 grok 1.0.70：
+
+- 对 `server/discover` 回 `-32601` 后，grok 照常走 `initialize`，后续 `tools/list`、`tools/call` 都正常。
+- `Authorization: Bearer ${GROKBOT_TURN_TOKEN}` 展开正确，令牌校验通过。
+- 用户明确要求时，Grok 先用 `search_tool` 找到工具，再用 `use_tool {"tool_name":"grokbot__react","tool_input":{"emoji":"👍"}}` 调用，最终回答正好是 `[[NO_REPLY]]`。
+- 只说"谢谢，好的"、不明确要求时，Grok 选择回一句文字，没有加表情。这属于提示词层面的行为，不影响功能是否可用。
