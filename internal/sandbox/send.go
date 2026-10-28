@@ -1,0 +1,97 @@
+package sandbox
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// anywhere marks a Deny entry that matches by file name in every directory.
+const anywhere = "**/"
+
+// CheckSendable decides whether the bot may read a file and send it to the
+// chat. It refuses whatever the sandbox denies Grok, however the path is
+// spelled, and returns the real path and size. Error messages are shown to
+// Grok, so they never carry file contents or more than the caller already has.
+func (p Policy) CheckSendable(path string) (real string, size int64, err error) {
+	if !filepath.IsAbs(path) {
+		return "", 0, errors.New("请给出绝对路径。")
+	}
+	clean := filepath.Clean(path)
+	// Check the spelling first so a denied name never reveals whether it exists.
+	if p.denied(clean) {
+		return "", 0, errSendDenied
+	}
+	real, err = filepath.EvalSymlinks(clean)
+	if err != nil {
+		return "", 0, sendReadError(err)
+	}
+	if p.denied(real) {
+		return "", 0, errSendDenied
+	}
+	info, err := os.Stat(real)
+	if err != nil {
+		return "", 0, sendReadError(err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", 0, errors.New("这不是普通文件。")
+	}
+	f, err := os.Open(real)
+	if err != nil {
+		return "", 0, sendReadError(err)
+	}
+	f.Close()
+	return real, info.Size(), nil
+}
+
+var errSendDenied = errors.New("这个文件不允许发送。")
+
+func sendReadError(err error) error {
+	if errors.Is(err, os.ErrNotExist) {
+		return errors.New("找不到这个文件。")
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return errors.New("没有权限读取这个文件。")
+	}
+	return errors.New("读取这个文件失败。")
+}
+
+// denied reports whether path, or any directory above it, is on the deny list.
+// Names are compared ignoring case, because macOS and Windows treat ".ENV" and
+// ".env" as one file; being stricter than the sandbox costs nothing here.
+func (p Policy) denied(path string) bool {
+	base := strings.ToLower(filepath.Base(path))
+	var targetInfos []os.FileInfo
+	for _, entry := range p.Deny() {
+		if pattern, ok := strings.CutPrefix(entry, anywhere); ok {
+			if match, err := filepath.Match(strings.ToLower(pattern), base); err != nil || match {
+				return true
+			}
+			continue
+		}
+		item := resolve(entry)
+		if within(path, item) {
+			return true
+		}
+		if info, err := os.Stat(item); err == nil {
+			targetInfos = append(targetInfos, info)
+		}
+	}
+	// Same file under another spelling: different case, or a hard link.
+	for cur := path; ; {
+		if info, err := os.Stat(cur); err == nil {
+			for _, target := range targetInfos {
+				if os.SameFile(info, target) {
+					return true
+				}
+			}
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			break
+		}
+		cur = parent
+	}
+	return false
+}
