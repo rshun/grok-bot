@@ -3,6 +3,7 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -128,5 +129,117 @@ func TestCheckSendableAccepts(t *testing.T) {
 		if _, _, err := p.CheckSendable(other); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
+	}
+}
+
+func TestCheckSendableRefusesKernelFiles(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("procfs is Linux only")
+	}
+	p := testPolicy(t)
+	for _, path := range []string{"/proc/self/environ", "/proc/self/cmdline", "/dev/fd/0"} {
+		if real, _, err := p.CheckSendable(path); err != errSendDenied {
+			t.Fatalf("%s: got %q, %v, want deny error", path, real, err)
+		}
+		if f, _, err := p.OpenSendable(path); err != errSendDenied {
+			if f != nil {
+				f.Close()
+			}
+			t.Fatalf("%s: OpenSendable got %v, want deny error", path, err)
+		}
+	}
+}
+
+// A second name for a denied file must not slip past: this exercises the
+// SameFile branch on every OS that can hard link.
+func TestCheckSendableRefusesHardLinkToDenied(t *testing.T) {
+	p := testPolicy(t)
+	writeFile(t, p.AuthPath, "PLACEHOLDER")
+	for name, target := range map[string]string{"env file": p.EnvFile, "auth file": p.AuthPath} {
+		t.Run(name, func(t *testing.T) {
+			link := filepath.Join(t.TempDir(), "harmless.txt")
+			if err := os.Link(target, link); err != nil {
+				t.Skipf("hard link unavailable: %v", err)
+			}
+			if real, _, err := p.CheckSendable(link); err != errSendDenied {
+				t.Fatalf("got %q, %v, want deny error", real, err)
+			}
+			if f, _, err := p.OpenSendable(link); err != errSendDenied {
+				if f != nil {
+					f.Close()
+				}
+				t.Fatalf("OpenSendable got %v, want deny error", err)
+			}
+		})
+	}
+}
+
+func TestCheckSendableRefusesAnyHardLink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("link count is not checked on Windows")
+	}
+	p := testPolicy(t)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a.txt")
+	writeFile(t, file, "x")
+	link := filepath.Join(dir, "b.txt")
+	if err := os.Link(file, link); err != nil {
+		t.Skipf("hard link unavailable: %v", err)
+	}
+	for _, path := range []string{file, link} {
+		if real, _, err := p.CheckSendable(path); err != errSendDenied {
+			t.Fatalf("CheckSendable %s: got %q, %v, want deny error", path, real, err)
+		}
+		if f, _, err := p.OpenSendable(path); err != errSendDenied {
+			if f != nil {
+				f.Close()
+			}
+			t.Fatalf("OpenSendable %s: got %v, want deny error", path, err)
+		}
+	}
+}
+
+func TestOpenSendableAccepts(t *testing.T) {
+	p := testPolicy(t)
+	file := filepath.Join(t.TempDir(), "notes.txt")
+	writeFile(t, file, "hello")
+	f, size, err := p.OpenSendable(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if size != 5 {
+		t.Fatalf("size %d, want 5", size)
+	}
+	buf := make([]byte, 8)
+	n, _ := f.Read(buf)
+	if string(buf[:n]) != "hello" {
+		t.Fatalf("read %q", buf[:n])
+	}
+}
+
+func TestOpenSendableRefuses(t *testing.T) {
+	p := testPolicy(t)
+	dir := t.TempDir()
+	dotenv := filepath.Join(dir, ".env")
+	writeFile(t, dotenv, "PLACEHOLDER")
+	cases := map[string]string{
+		"dir":      dir,
+		"denied":   dotenv,
+		"env file": p.EnvFile,
+		"missing":  filepath.Join(dir, "missing.txt"),
+		"relative": "a.txt",
+	}
+	for name, path := range cases {
+		t.Run(name, func(t *testing.T) {
+			f, _, err := p.OpenSendable(path)
+			if err == nil {
+				f.Close()
+				t.Fatalf("opened %q", path)
+			}
+			if f != nil {
+				t.Fatal("file returned with error")
+			}
+		})
 	}
 }
