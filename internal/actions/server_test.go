@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -228,15 +230,42 @@ func TestTurnsAreIsolated(t *testing.T) {
 	}
 }
 
+const leakyURL = `https://api.telegram.org/botyour_token_here/setMessageReaction`
+
+// rawCall returns the raw HTTP body of a tools/call so leaks anywhere in it are caught.
+func rawCall(t *testing.T, ts *httptest.Server, token, name, args string) string {
+	t.Helper()
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + name + `","arguments":` + args + `}}`
+	resp, data := post(t, ts, token, body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", resp.StatusCode, data)
+	}
+	return string(data)
+}
+
 func TestReactErrors(t *testing.T) {
 	s, ts := newTestServer(t)
-	turn := &Turn{React: func(context.Context, string) error { return errors.New("no such emoji") }}
+	var failWith error
+	turn := &Turn{React: func(context.Context, string) error { return failWith }}
 	env, end := s.Begin(turn)
 	defer end()
 	token := tokenOf(t, env)
 
+	// A *ToolError message reaches Grok verbatim, even when wrapped.
+	failWith = fmt.Errorf("react: %w", &ToolError{Msg: "emoji not allowed; use one of: 👍 ❤"})
 	out := call(t, ts, token, "react", `{"emoji":"x"}`)
-	if !out.IsError || out.Content[0].Text != "no such emoji" {
+	if !out.IsError || out.Content[0].Text != "emoji not allowed; use one of: 👍 ❤" {
+		t.Fatalf("got %+v", out)
+	}
+
+	// Any other error is replaced by a fixed message and never leaks.
+	failWith = &url.Error{Op: "Post", URL: leakyURL, Err: errors.New("connection refused")}
+	body := rawCall(t, ts, token, "react", `{"emoji":"x"}`)
+	if strings.Contains(body, "your_token_here") || strings.Contains(body, "telegram") || strings.Contains(body, "refused") {
+		t.Fatalf("error text leaked: %s", body)
+	}
+	out = call(t, ts, token, "react", `{"emoji":"x"}`)
+	if !out.IsError || out.Content[0].Text != "could not react" {
 		t.Fatalf("got %+v", out)
 	}
 	if turn.Reacted() {
@@ -247,13 +276,41 @@ func TestReactErrors(t *testing.T) {
 	}
 }
 
+func TestSendFileErrors(t *testing.T) {
+	s, ts := newTestServer(t)
+	var failWith error
+	turn := &Turn{CheckFile: func(string) (File, error) { return File{}, failWith }}
+	env, end := s.Begin(turn)
+	defer end()
+	token := tokenOf(t, env)
+
+	failWith = &ToolError{Msg: "file not found"}
+	out := call(t, ts, token, "send_file", `{"path":"/x"}`)
+	if !out.IsError || out.Content[0].Text != "file not found" {
+		t.Fatalf("got %+v", out)
+	}
+
+	failWith = &url.Error{Op: "Post", URL: leakyURL, Err: errors.New("connection refused")}
+	body := rawCall(t, ts, token, "send_file", `{"path":"/x"}`)
+	if strings.Contains(body, "your_token_here") || strings.Contains(body, "telegram") || strings.Contains(body, "refused") {
+		t.Fatalf("error text leaked: %s", body)
+	}
+	out = call(t, ts, token, "send_file", `{"path":"/x"}`)
+	if !out.IsError || out.Content[0].Text != "could not send file" {
+		t.Fatalf("got %+v", out)
+	}
+	if len(turn.Files()) != 0 {
+		t.Fatal("failed file was queued")
+	}
+}
+
 func TestSendFileQueuesAndLimits(t *testing.T) {
 	s, ts := newTestServer(t)
 	turn := &Turn{
 		MaxFiles: 2,
 		CheckFile: func(path string) (File, error) {
 			if path == "/bad" {
-				return File{}, errors.New("file is too large")
+				return File{}, &ToolError{Msg: "file is too large"}
 			}
 			return File{Path: path, Name: "a.txt", Size: 3}, nil
 		},

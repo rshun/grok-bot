@@ -64,6 +64,22 @@ func (t *Turn) maxFiles() int {
 	return defaultMaxFiles
 }
 
+// ToolError is an error whose message is safe and useful to show to Grok.
+// Any other error from a Turn callback is replaced by a fixed message, since
+// platform errors can embed request URLs that contain secrets.
+type ToolError struct{ Msg string }
+
+func (e *ToolError) Error() string { return e.Msg }
+
+// modelMessage returns the text of a *ToolError, or fallback for any other error.
+func modelMessage(err error, fallback string) string {
+	var toolErr *ToolError
+	if errors.As(err, &toolErr) {
+		return toolErr.Msg
+	}
+	return fallback
+}
+
 // Server is the local MCP endpoint. Each grok run gets its own bearer token.
 type Server struct {
 	ln net.Listener
@@ -303,7 +319,7 @@ func callTool(ctx context.Context, t *Turn, name string, args json.RawMessage) m
 			return toolResult("emoji is required", true)
 		}
 		if err := t.React(ctx, in.Emoji); err != nil {
-			return toolResult(err.Error(), true)
+			return toolResult(modelMessage(err, "could not react"), true)
 		}
 		t.mu.Lock()
 		t.reacted = true
@@ -322,7 +338,7 @@ func callTool(ctx context.Context, t *Turn, name string, args json.RawMessage) m
 		}
 		file, err := t.CheckFile(in.Path)
 		if err != nil {
-			return toolResult(err.Error(), true)
+			return toolResult(modelMessage(err, "could not send file"), true)
 		}
 		file.Caption = in.Caption
 		t.mu.Lock()
