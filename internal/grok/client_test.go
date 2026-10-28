@@ -411,3 +411,35 @@ func TestPromptFileRemoved(t *testing.T) {
 		})
 	}
 }
+
+func TestEnvWithoutUpdateDropsBotConfig(t *testing.T) {
+	botKeys := []string{
+		"TELEGRAM_BOT_TOKEN", "DISCORD_BOT_TOKEN", "ALLOWED_USER_IDS", "DISCORD_ALLOWED_USER_IDS",
+		"DATA_DIR", "DEFAULT_MODEL", "WEB_SEARCH", "BOT_ENV_FILE", "TIMEZONE",
+		"QUEUE_LIMIT", "TASK_LIMIT", "TASK_MIN_INTERVAL",
+	}
+	for _, key := range botKeys {
+		t.Setenv(key, "your_token_here")
+	}
+	t.Setenv("GROK_DISABLE_AUTOUPDATER", "0")
+	t.Setenv("GROK_BOT_TEST_PLAIN", "kept")
+
+	env := envWithoutUpdate()
+	for _, key := range botKeys {
+		for _, item := range env {
+			if strings.HasPrefix(item, key+"=") {
+				t.Errorf("env still has %s", key)
+			}
+		}
+	}
+	count := map[string]int{}
+	for _, item := range env {
+		count[item]++
+	}
+	if count["GROK_DISABLE_AUTOUPDATER=1"] != 1 || count["GROK_DISABLE_AUTOUPDATER=0"] != 0 {
+		t.Errorf("env should set GROK_DISABLE_AUTOUPDATER=1 once")
+	}
+	if count["GROK_BOT_TEST_PLAIN=kept"] != 1 {
+		t.Errorf("env dropped an unrelated variable")
+	}
+}
