@@ -29,6 +29,13 @@ type Receipt interface {
 	MarkReceived(ctx context.Context, in Inbound) error
 }
 
+// Reactor lets a replier put an emoji reaction on a user's message.
+// React returns an *actions.ToolError for input the platform cannot use, whose text is safe to
+// show to Grok; any other error is a platform failure and must not be shown.
+type Reactor interface {
+	React(ctx context.Context, in Inbound, emoji string) error
+}
+
 // Progress lets a replier show an editable "working" message for one inbound message.
 type Progress interface {
 	StartProgress(ctx context.Context, in Inbound, text string) (ProgressHandle, error)
