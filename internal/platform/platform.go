@@ -1,6 +1,9 @@
 package platform
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 const (
 	// Telegram and Discord are the platform names stored with each chat.
@@ -47,4 +50,24 @@ type ProgressHandle interface {
 	// Finish 把进度消息改成第一段，其余段落新发并引用原消息。编辑失败时自己改为全部新发，只有新发也失败才返回错误。
 	Finish(ctx context.Context, text string) error
 	Delete(ctx context.Context) error
+}
+
+// OutFile is one file to send to a chat. The file is read through Open instead of a path, so
+// the bytes sent are the bytes that were checked.
+type OutFile struct {
+	// Name is the file name shown in the chat.
+	Name string
+	// Caption is text shown with the file; the platform may refuse one that is too long.
+	Caption string
+	// Open returns a freshly validated reader and its size. Each call re-checks the file and
+	// must be closed by the caller; a platform that retries a different way opens it again.
+	Open func() (io.ReadCloser, int64, error)
+}
+
+// FileSender lets a replier send files to a chat.
+// replyTo is the message to quote, or empty to send without quoting.
+type FileSender interface {
+	SendFile(ctx context.Context, chatID, replyTo string, f OutFile) error
+	// FileLimit is the largest file in bytes the platform accepts.
+	FileLimit() int64
 }

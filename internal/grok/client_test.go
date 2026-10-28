@@ -281,3 +281,21 @@ func TestSystemPromptActions(t *testing.T) {
 		t.Fatal("react mentioned in a schema call")
 	}
 }
+
+func TestSystemPromptSendFile(t *testing.T) {
+	const sentence = " You can send a file to the user with the MCP tool grokbot__send_file; path must be absolute."
+	base := ReplyOptions{SessionID: "sess", Model: "grok-4.7", Prompt: "hi", Actions: true, FileTools: true}
+	if strings.Contains(systemPromptFor(base), "send_file") {
+		t.Fatal("send_file mentioned while off")
+	}
+	on := base
+	on.SendFile = true
+	if !strings.Contains(systemPromptFor(on), sentence) {
+		t.Fatalf("send_file missing: %s", systemPromptFor(on))
+	}
+	schema := on
+	schema.JSONSchema = `{"type":"object"}`
+	if strings.Contains(systemPromptFor(schema), "send_file") {
+		t.Fatal("send_file mentioned in a schema call")
+	}
+}

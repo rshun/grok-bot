@@ -24,6 +24,8 @@ const promptFiles = " You may read any file the system lets you read. You may wr
 
 const promptReact = " You can react to the user's message with one emoji using the MCP tool grokbot__react. If a reaction alone is enough, call it and reply with exactly [[NO_REPLY]]."
 
+const promptSendFile = " You can send a file to the user with the MCP tool grokbot__send_file; path must be absolute."
+
 const promptSchema = "Convert the user's scheduling request into JSON that matches the schema. Do not call tools."
 
 // webTools are opened when web search is enabled.
@@ -99,6 +101,8 @@ type ReplyOptions struct {
 	Actions bool
 	// React names the react tool in the system prompt.
 	React bool
+	// SendFile names the send_file tool in the system prompt.
+	SendFile bool
 }
 
 func (c *Client) Reply(ctx context.Context, opts ReplyOptions) (HeadlessResult, error) {
@@ -229,6 +233,9 @@ func systemPromptFor(opts ReplyOptions) string {
 	}
 	if opts.React {
 		prompt += promptReact
+	}
+	if opts.SendFile {
+		prompt += promptSendFile
 	}
 	if opts.FileTools {
 		return prompt + fmt.Sprintf(promptFiles, dirList(opts.WriteDirs))
