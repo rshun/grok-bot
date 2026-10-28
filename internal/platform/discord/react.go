@@ -9,8 +9,8 @@ import (
 	"github.com/rshun/grok-bot/internal/platform"
 )
 
-// maxReactionInput bounds the emoji text; the longest Unicode emoji sequences are well under it.
-const maxReactionInput = 32
+// maxReactionInput bounds the emoji text in bytes; ZWJ sequences with skin tones reach about 35.
+const maxReactionInput = 64
 
 // React puts a Unicode emoji reaction on the user's message. Custom emoji are not supported.
 func (b *Bot) React(ctx context.Context, in platform.Inbound, emoji string) error {

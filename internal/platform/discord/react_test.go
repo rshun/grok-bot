@@ -70,7 +70,7 @@ func TestDiscordReactRefusesUnusableEmoji(t *testing.T) {
 	})}
 	b := &Bot{session: s}
 	in := platform.Inbound{ChatID: "9", MessageID: "17"}
-	for _, bad := range []string{"", "  ", "<:blob:123456789>", "<a:blob:123456789>", "blob:123456789", "thumbsup", "a/b", strings.Repeat("👍", 9)} {
+	for _, bad := range []string{"", "  ", "<:blob:123456789>", "<a:blob:123456789>", "blob:123456789", "thumbsup", "a/b", strings.Repeat("👍", 17)} {
 		err := b.React(context.Background(), in, bad)
 		var toolErr *actions.ToolError
 		if !errors.As(err, &toolErr) || toolErr.Msg == "" {
@@ -100,5 +100,43 @@ func TestDiscordReactErrorsStayPlain(t *testing.T) {
 	cancel()
 	if err := b.React(ctx, platform.Inbound{ChatID: "9", MessageID: "17"}, "👍"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestDiscordReactLongEmojiSequence(t *testing.T) {
+	s, err := discordgo.New("Bot your_token_here")
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	s.Client = &http.Client{Transport: receiptTransport(func(*http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
+	})}
+	b := &Bot{session: s}
+	in := platform.Inbound{ChatID: "9", MessageID: "17"}
+	ctx := context.Background()
+	// Kiss with two skin tones: a valid 35-byte ZWJ sequence.
+	kiss := "👩🏽‍❤️‍💋‍👨🏿"
+	if len(kiss) != 35 {
+		t.Fatalf("test emoji is %d bytes", len(kiss))
+	}
+	if err := b.React(ctx, in, kiss); err != nil {
+		t.Fatalf("valid sequence refused: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls: %d", calls)
+	}
+	// 64 bytes is the limit; 65 is refused before reaching Discord.
+	if err := b.React(ctx, in, strings.Repeat("👍", 16)); err != nil {
+		t.Fatalf("64 bytes refused: %v", err)
+	}
+	err = b.React(ctx, in, strings.Repeat("👍", 16)+"a")
+	var toolErr *actions.ToolError
+	if !errors.As(err, &toolErr) || toolErr.Msg == "" {
+		t.Fatalf("65 bytes: want *actions.ToolError, got %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls: %d", calls)
 	}
 }

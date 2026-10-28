@@ -272,6 +272,9 @@ func (s *Service) chat(ctx context.Context, in platform.Inbound, out platform.Re
 		if res.rebuilt {
 			notes = append(notes, rebuiltNotice)
 		}
+		if mentionsPath(in.Text) && s.needsReset(ctx, in) {
+			notes = append(notes, resetReminder)
+		}
 		return strings.Join(notes, "\n"), true, nil
 	}
 	reply = res.text

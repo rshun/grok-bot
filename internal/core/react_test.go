@@ -337,3 +337,31 @@ func TestTaskTurnHasNoReact(t *testing.T) {
 	svc.runDue(context.Background())
 	ev.waitFor(t, 1)
 }
+
+func TestReactOnlyKeepsResetReminder(t *testing.T) {
+	svc, engine, ts := grantService(t)
+	svc.ProgressInterval = time.Nanosecond
+	if err := svc.Store.SetSession(context.Background(), "telegram", "9", "old"); err != nil {
+		t.Fatal(err)
+	}
+	reactThenReply(t, engine, ts, "👍", noReply)
+	dir, _ := realDir(t)
+
+	// With a progress message the reminder replaces it.
+	ev := &progressEvents{}
+	handleMessage(svc, reactingOut{fakeProgressOut: fakeProgressOut{ev: ev}}, "看看 "+dir)
+	ev.waitFor(t, 4)
+	time.Sleep(50 * time.Millisecond)
+	if got, want := joined(ev.snapshot()), "receipt|start:处理中…|react:👍@5|finish:"+resetReminder; got != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+
+	// Without one it is sent on its own.
+	ev2 := &progressEvents{}
+	handleMessage(svc, reactingPlain{ev: ev2}, "看看 "+dir)
+	ev2.waitFor(t, 3)
+	time.Sleep(50 * time.Millisecond)
+	if got, want := joined(ev2.snapshot()), "receipt|react:👍@5|send:"+resetReminder; got != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+}
