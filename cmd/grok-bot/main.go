@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -9,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/rshun/grok-bot/internal/actions"
 	"github.com/rshun/grok-bot/internal/config"
 	"github.com/rshun/grok-bot/internal/core"
 	"github.com/rshun/grok-bot/internal/grok"
@@ -69,7 +71,24 @@ func main() {
 		UserURL:    cfg.UserURL,
 		Timeout:    cfg.GrokTimeout,
 	}
+	// The local MCP server lets grok act on the chat during a turn. Chat keeps working without it.
+	actionsSrv, err := actions.Listen("127.0.0.1:0")
+	if err != nil {
+		slog.Error("actions listen", "err", err)
+		os.Exit(1)
+	}
+	defer actionsSrv.Close()
+	var actionsForSvc *actions.Server
+	switch err := actions.WriteConfig(filepath.Join(workspace, ".grok", "config.toml"), actionsSrv.Port()); {
+	case err == nil:
+		actionsForSvc = actionsSrv
+	case errors.Is(err, actions.ErrUnmanaged):
+		slog.Warn("workspace .grok/config.toml was not written by the bot; chat actions are off")
+	default:
+		slog.Error("write grok config; chat actions are off", "err", err)
+	}
 	svc := &core.Service{
+		Actions:         actionsForSvc,
 		Store:           db,
 		Engine:          engine,
 		AllowedUsers:    map[string]map[string]struct{}{},
@@ -117,6 +136,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	slog.Info("listening", logArgs...)
+	go func() {
+		if err := actionsSrv.Serve(ctx); err != nil {
+			slog.Error("actions server", "err", err)
+		}
+	}()
 	go svc.RunScheduler(ctx, 30*time.Second)
 	errCh := make(chan error, len(runners))
 	for _, item := range runners {

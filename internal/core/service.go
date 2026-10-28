@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rshun/grok-bot/internal/actions"
 	"github.com/rshun/grok-bot/internal/grok"
 	"github.com/rshun/grok-bot/internal/platform"
 	"github.com/rshun/grok-bot/internal/sandbox"
@@ -39,6 +40,8 @@ type Service struct {
 	WebSearch bool
 	// Sandbox limits file access for new sessions; nil turns file tools off.
 	Sandbox *sandbox.Manager
+	// Actions is the local MCP server for per-turn chat actions; nil means no MCP channel.
+	Actions *actions.Server
 	// Senders post scheduled task results to a chat, keyed by platform name.
 	Senders         map[string]platform.Replier
 	Location        *time.Location
@@ -163,11 +166,11 @@ func (s *Service) dispatch(it item) {
 		ctx = context.Background()
 	}
 	if it.task != nil {
-		s.send(ctx, it.out, it.in.ChatID, s.runTask(ctx, *it.task))
+		s.send(ctx, it.out, it.in.ChatID, s.runTask(ctx, it.in, it.out, *it.task))
 		return
 	}
 	view := s.startProgress(ctx, it)
-	reply, err := s.answer(ctx, it.in, view.onTool(ctx))
+	reply, err := s.answer(ctx, it.in, it.out, view.onTool(ctx))
 	if err != nil {
 		slog.Error("chat turn failed", "chat", it.in.ChatID, "err", err)
 		reply = grok.UserFacing(err)
@@ -183,11 +186,11 @@ func (s *Service) dispatch(it item) {
 	s.send(ctx, it.out, it.in.ChatID, reply)
 }
 
-func (s *Service) answer(ctx context.Context, in platform.Inbound, onTool func(grok.ToolUse)) (string, error) {
+func (s *Service) answer(ctx context.Context, in platform.Inbound, out platform.Replier, onTool func(grok.ToolUse)) (string, error) {
 	if cmd, arg, ok := parseCommand(in.Text); ok {
 		return s.command(ctx, in, cmd, arg)
 	}
-	return s.chat(ctx, in, onTool)
+	return s.chat(ctx, in, out, onTool)
 }
 
 func (s *Service) command(ctx context.Context, in platform.Inbound, cmd, arg string) (string, error) {
@@ -243,9 +246,9 @@ func (s *Service) modelCommand(ctx context.Context, in platform.Inbound, arg str
 
 // chat applies write grants from the message, runs the turn, and adds the
 // confirmations before the reply and the /reset reminder after it.
-func (s *Service) chat(ctx context.Context, in platform.Inbound, onTool func(grok.ToolUse)) (string, error) {
+func (s *Service) chat(ctx context.Context, in platform.Inbound, out platform.Replier, onTool func(grok.ToolUse)) (string, error) {
 	notes := s.applyGrants(ctx, in.Text)
-	reply, err := s.chatTurn(ctx, in, onTool)
+	reply, err := s.chatTurn(ctx, in, out, onTool)
 	if err != nil {
 		return "", err
 	}
@@ -272,12 +275,15 @@ func (s *Service) needsReset(ctx context.Context, in platform.Inbound) bool {
 	return err == nil && chat.SessionID != "" && chat.Sandbox != sandbox.ProfileName
 }
 
-func (s *Service) chatTurn(ctx context.Context, in platform.Inbound, onTool func(grok.ToolUse)) (string, error) {
+func (s *Service) chatTurn(ctx context.Context, in platform.Inbound, out platform.Replier, onTool func(grok.ToolUse)) (string, error) {
 	chat, err := s.Store.Chat(ctx, in.Platform, in.ChatID)
 	if err != nil {
 		return "", err
 	}
-	base := grok.ReplyOptions{Model: chat.Model, Prompt: in.Text, WebSearch: s.WebSearch, OnTool: onTool}
+	// One turn covers the rebuild after a missing session too; its token ends when this returns.
+	turn, env, end := s.beginTurn(in, out, chat.Sandbox == sandbox.ProfileName)
+	defer end()
+	base := withTurn(grok.ReplyOptions{Model: chat.Model, Prompt: in.Text, WebSearch: s.WebSearch, OnTool: onTool}, turn, env)
 	if chat.SessionID == "" {
 		return s.startSession(ctx, in, base)
 	}

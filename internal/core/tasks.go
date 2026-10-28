@@ -250,7 +250,7 @@ func (s *Service) runDue(ctx context.Context) {
 }
 
 // runTask answers a task in a fresh session that is never saved as the chat's session.
-func (s *Service) runTask(ctx context.Context, t store.Task) string {
+func (s *Service) runTask(ctx context.Context, in platform.Inbound, out platform.Replier, t store.Task) string {
 	header := taskHeader(t)
 	chat, err := s.Store.Chat(ctx, t.Platform, t.ChatID)
 	if err != nil {
@@ -267,7 +267,10 @@ func (s *Service) runTask(ctx context.Context, t store.Task) string {
 		Prompt:     t.Prompt,
 		WebSearch:  s.WebSearch,
 	}
-	s.newSessionOptions(ctx, &opts)
+	profile := s.newSessionOptions(ctx, &opts)
+	turn, env, end := s.beginTurn(in, out, profile != "")
+	defer end()
+	opts = withTurn(opts, turn, env)
 	result, err := s.Engine.Reply(ctx, opts)
 	if err != nil {
 		slog.Error("task run failed", "task", t.ID, "err", err)

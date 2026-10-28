@@ -242,3 +242,42 @@ func TestPlainCaptureKeepsOnlyNonJSONLinesBounded(t *testing.T) {
 		t.Fatalf("capture not bounded: %d", len(got))
 	}
 }
+
+func TestReplyArgsTrust(t *testing.T) {
+	base := ReplyOptions{SessionID: "sess", NewSession: true, Model: "grok-4.7", Prompt: "hi"}
+	if hasArg(replyArgs("/ws", base), "--trust") {
+		t.Fatal("--trust passed without a channel")
+	}
+	on := base
+	on.Actions = true
+	if !hasArg(replyArgs("/ws", on), "--trust") {
+		t.Fatalf("--trust missing: %q", replyArgs("/ws", on))
+	}
+	on.JSONSchema = `{"type":"object"}`
+	if hasArg(replyArgs("/ws", on), "--trust") {
+		t.Fatal("--trust passed for a schema call")
+	}
+}
+
+func TestSystemPromptActions(t *testing.T) {
+	base := ReplyOptions{SessionID: "sess", Model: "grok-4.7", Prompt: "hi", Actions: true}
+	off := systemPromptFor(base)
+	if strings.Contains(off, "grokbot__react") || strings.Contains(off, "[[NO_REPLY]]") {
+		t.Fatalf("react mentioned while off: %s", off)
+	}
+	for _, files := range []bool{false, true} {
+		on := base
+		on.React = true
+		on.FileTools = files
+		prompt := systemPromptFor(on)
+		if !strings.Contains(prompt, "grokbot__react") || !strings.Contains(prompt, "[[NO_REPLY]]") {
+			t.Fatalf("react missing (files=%v): %s", files, prompt)
+		}
+	}
+	schema := base
+	schema.React = true
+	schema.JSONSchema = `{"type":"object"}`
+	if strings.Contains(systemPromptFor(schema), "grokbot__react") {
+		t.Fatal("react mentioned in a schema call")
+	}
+}
