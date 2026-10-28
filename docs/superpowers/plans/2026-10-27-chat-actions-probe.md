@@ -73,3 +73,11 @@
 - `Authorization: Bearer ${GROKBOT_TURN_TOKEN}` 展开正确，令牌校验通过。
 - 用户明确要求时，Grok 先用 `search_tool` 找到工具，再用 `use_tool {"tool_name":"grokbot__react","tool_input":{"emoji":"👍"}}` 调用，最终回答正好是 `[[NO_REPLY]]`。
 - 只说"谢谢，好的"、不明确要求时，Grok 选择回一句文字，没有加表情。这属于提示词层面的行为，不影响功能是否可用。
+
+## P5 补充项的本机预检（2026-10-28，本机 Windows，不带沙箱）
+
+- (a) 恢复会话：先用 `-s` 新建会话并调用 `grokbot__react`，再起一个新的 MCP 服务（新端口、新令牌，配置文件随之重写），用 `-r` 恢复同一会话再调用一次。第二次照样成功，说明 grok 每次进程启动都按当前配置和环境变量重新连接，不会沿用会话里旧的令牌或端口。
+- (b) MCP 地址不可达：配置指向 `127.0.0.1:9`（没有服务），加 `--trust` 运行，grok 正常回答，退出码 0，stderr 为空。回滚到旧程序后遗留的配置文件只会让连接失败，不会让对话失败。
+- (c) 并发写 `trusted_folders.toml`：grok 自带 `trusted_folders.toml.lock` 锁文件；在 Debian 沙箱里该文件只读，不会写入。未单独测试并发。
+
+Debian 上的 P5 第 1、2 项仍待用户执行。
