@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -38,6 +39,8 @@ func (b *Bot) Run(ctx context.Context, handler func(context.Context, platform.In
 		<-ctx.Done()
 		b.api.StopReceivingUpdates()
 	}()
+	group := newAlbums(ctx, handler)
+	defer group.stop()
 	for update := range stream {
 		msg := update.Message
 		if msg == nil || msg.From == nil {
@@ -46,7 +49,13 @@ func (b *Bot) Run(ctx context.Context, handler func(context.Context, platform.In
 		if msg.Chat.Type != "private" {
 			continue
 		}
-		handler(ctx, b.inbound(msg), &messageReply{Bot: b, messageID: msg.MessageID})
+		in := b.inbound(msg)
+		if msg.MediaGroupID != "" {
+			// Album parts carry the caption on one message only; keep it for the merge even
+			// when that part is not a picture.
+			in.Text = strings.TrimSpace(msg.Caption)
+		}
+		group.add(in, msg.MediaGroupID, &messageReply{Bot: b, messageID: msg.MessageID})
 	}
 	return ctx.Err()
 }
