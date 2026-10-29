@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -28,17 +27,7 @@ func imageMIME(a *discordgo.MessageAttachment) string {
 		}
 		return ""
 	}
-	switch strings.ToLower(filepath.Ext(a.Filename)) {
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".png":
-		return "image/png"
-	case ".gif":
-		return "image/gif"
-	case ".webp":
-		return "image/webp"
-	}
-	return ""
+	return platform.ImageMIMEByName(a.Filename)
 }
 
 // attachmentImages splits the attachments into pictures and a flag for everything left out.

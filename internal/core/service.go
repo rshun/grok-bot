@@ -451,7 +451,7 @@ func parseCommand(text string) (cmd, arg string, ok bool) {
 }
 
 func helpText(version string) string {
-	text := `直接发文字，我会接着这个聊天的上下文回复。
+	text := `直接发文字或图片，我会接着这个聊天的上下文回复。
 
 /model
     查看可用模型和当前模型

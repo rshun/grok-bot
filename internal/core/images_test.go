@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/rshun/grok-bot/internal/grok"
 	"github.com/rshun/grok-bot/internal/platform"
@@ -198,4 +199,27 @@ func TestImagesResentWhenSessionIsRebuilt(t *testing.T) {
 	if len(engine.calls) != 2 || len(engine.calls[0].Images) != 1 || len(engine.calls[1].Images) != 1 || l.n.Load() != 1 {
 		t.Fatalf("calls=%#v loaded=%d", engine.calls, l.n.Load())
 	}
+}
+
+func TestStalledImageLoadIsBounded(t *testing.T) {
+	old := imageLoadTimeout
+	imageLoadTimeout = 50 * time.Millisecond
+	defer func() { imageLoadTimeout = old }()
+
+	svc, engine := testService(t)
+	rec := &recorder{}
+	stalled := platform.Image{MIME: "image/png", Load: func(ctx context.Context) ([]byte, error) {
+		<-ctx.Done() // a transfer that never finishes on its own
+		return nil, ctx.Err()
+	}}
+	sendImages(svc, rec, "1", "hi", stalled)
+	got := rec.wait(t, 1)
+	if got[0] != imageFailedText || len(engine.calls) != 0 {
+		t.Fatalf("%#v calls=%d", got, len(engine.calls))
+	}
+	// The lane is free again: a plain message after the stall still gets an answer.
+	svc.Handle(context.Background(), platform.Inbound{
+		Platform: "telegram", ChatID: "9", MessageID: "6", UserID: "1", Text: "again", TextMessage: true,
+	}, capture{rec})
+	rec.wait(t, 2)
 }

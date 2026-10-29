@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -178,5 +179,46 @@ func TestLoadCancelled(t *testing.T) {
 	cancel()
 	if _, err := in.Images[0].Load(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestLoadStalledGetFileEndsWithContext(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	b := downloadBot(func(req *http.Request) (*http.Response, error) {
+		<-release // getFile takes no ctx in tgbotapi; it hangs until the test ends
+		return nil, errors.New("released")
+	})
+	in := b.inbound(privateMessage(tgbotapi.Message{Photo: []tgbotapi.PhotoSize{{FileID: "f", Width: 5, Height: 5}}}))
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := in.Images[0].Load(ctx)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Load did not return after ctx ended")
+	}
+}
+
+func TestInboundImageDocumentWithoutMIME(t *testing.T) {
+	b := &Bot{api: &tgbotapi.BotAPI{Token: "your_token_here"}}
+	in := b.inbound(privateMessage(tgbotapi.Message{
+		Document: &tgbotapi.Document{FileID: "d", FileName: "Shot.PNG"},
+	}))
+	if !in.TextMessage || len(in.Images) != 1 || in.Images[0].MIME != "image/png" || in.Skipped {
+		t.Fatalf("%#v", in)
+	}
+	in = b.inbound(privateMessage(tgbotapi.Message{
+		Document: &tgbotapi.Document{FileID: "d", FileName: "notes.txt"},
+	}))
+	if in.TextMessage || len(in.Images) != 0 || !in.Skipped {
+		t.Fatalf("%#v", in)
 	}
 }

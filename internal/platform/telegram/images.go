@@ -46,7 +46,12 @@ func (b *Bot) images(msg *tgbotapi.Message) (images []platform.Image, skipped bo
 		images = append(images, b.image(best.FileID, "image/jpeg", "", int64(best.FileSize)))
 	}
 	if doc := msg.Document; doc != nil {
-		if mime := strings.ToLower(doc.MimeType); isImageMIME(mime) {
+		mime := strings.ToLower(strings.TrimSpace(doc.MimeType))
+		if mime == "" {
+			// Telegram leaves the type out for some clients; the name is the only hint then.
+			mime = platform.ImageMIMEByName(doc.FileName)
+		}
+		if isImageMIME(mime) {
 			images = append(images, b.image(doc.FileID, mime, doc.FileName, int64(doc.FileSize)))
 		} else {
 			skipped = true
@@ -87,13 +92,34 @@ func (b *Bot) image(fileID, mime, name string, size int64) platform.Image {
 	}
 }
 
+// getFile is api.GetFile bounded by ctx. tgbotapi takes no context there, so the call runs on
+// its own goroutine; when ctx ends first the caller moves on and the goroutine finishes
+// whenever the HTTP call does.
+func (b *Bot) getFile(ctx context.Context, fileID string) (tgbotapi.File, error) {
+	type result struct {
+		file tgbotapi.File
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		file, err := b.api.GetFile(tgbotapi.FileConfig{FileID: fileID})
+		done <- result{file, err}
+	}()
+	select {
+	case r := <-done:
+		return r.file, r.err
+	case <-ctx.Done():
+		return tgbotapi.File{}, ctx.Err()
+	}
+}
+
 // download fetches a file through getFile. The download URL holds the bot token, so no error
 // returned from here contains a URL: transport errors are replaced by fixed texts.
 func (b *Bot) download(ctx context.Context, fileID string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	file, err := b.api.GetFile(tgbotapi.FileConfig{FileID: fileID})
+	file, err := b.getFile(ctx, fileID)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()

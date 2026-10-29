@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
+	"strings"
 )
 
 const (
@@ -61,6 +63,22 @@ func ReadImage(r io.Reader) ([]byte, error) {
 		return nil, ErrImageTooLarge
 	}
 	return data, nil
+}
+
+// ImageMIMEByName returns the image type Grok takes for a file name's extension, or "" when
+// the extension is not one of them. It is only for attachments that state no type.
+func ImageMIMEByName(name string) string {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".png":
+		return "image/png"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	}
+	return ""
 }
 
 // Replier sends a message back to the chat that produced an inbound message.
