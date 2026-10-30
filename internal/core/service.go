@@ -3,17 +3,23 @@ package core
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/rshun/grok-bot/internal/actions"
 	"github.com/rshun/grok-bot/internal/grok"
 	"github.com/rshun/grok-bot/internal/platform"
 	"github.com/rshun/grok-bot/internal/sandbox"
 	"github.com/rshun/grok-bot/internal/store"
 )
+
+// emptyReplyText is shown when a turn finishes without any answer text.
+const emptyReplyText = "处理失败：没有得到回复。"
 
 // Engine is the Grok subscription surface used by the chat core.
 type Engine interface {
@@ -34,11 +40,17 @@ type Service struct {
 	WebSearch bool
 	// Sandbox limits file access for new sessions; nil turns file tools off.
 	Sandbox *sandbox.Manager
+	// Actions is the local MCP server for per-turn chat actions; nil means no MCP channel.
+	Actions *actions.Server
 	// Senders post scheduled task results to a chat, keyed by platform name.
 	Senders         map[string]platform.Replier
 	Location        *time.Location
 	TaskLimit       int
 	TaskMinInterval time.Duration
+	// ProgressInterval is the shortest gap between edits of a progress message; 0 means 3 seconds.
+	ProgressInterval time.Duration
+	// ImageLoadTimeout bounds downloading the pictures of one message; 0 means 3 minutes.
+	ImageLoadTimeout time.Duration
 	// Now is the clock for scheduling; nil means time.Now.
 	Now func() time.Time
 
@@ -70,21 +82,27 @@ func (s *Service) Handle(ctx context.Context, in platform.Inbound, out platform.
 		return
 	}
 	if !in.TextMessage {
-		s.send(ctx, out, in.ChatID, "目前只处理文字。")
+		s.send(ctx, out, in.ChatID, unsupportedText)
 		return
 	}
 	text := strings.TrimSpace(in.Text)
-	if text == "" {
+	if text == "" && len(in.Images) == 0 {
 		return
 	}
 	in.Text = text
+	limitImages(&in)
+	// Nothing is downloaded yet: the declared size is enough to refuse an image.
+	if oversize(in.Images) {
+		s.send(ctx, out, in.ChatID, imageTooLargeText)
+		return
+	}
 	lane := s.lane(in.Platform, in.ChatID)
 	ahead, ok := lane.reserve(s.limit())
 	if !ok {
 		s.send(ctx, out, in.ChatID, "前面的消息还在处理，这条先放不下了。等回复后再发。")
 		return
 	}
-	if _, _, command := parseCommand(in.Text); !command {
+	if _, _, command := parseInboundCommand(in); !command {
 		if receipt, ok := out.(platform.Receipt); ok {
 			if err := receipt.MarkReceived(ctx, in); err != nil {
 				// A missing reaction or typing indicator must not prevent the reply.
@@ -156,25 +174,50 @@ func (s *Service) dispatch(it item) {
 		ctx = context.Background()
 	}
 	if it.task != nil {
-		s.send(ctx, it.out, it.in.ChatID, s.runTask(ctx, *it.task))
+		text, files := s.runTask(ctx, it.in, it.out, *it.task)
+		s.send(ctx, it.out, it.in.ChatID, text)
+		// A scheduled run has no message to quote.
+		s.flushFiles(ctx, it.out, it.in.ChatID, "", files)
 		return
 	}
-	reply, err := s.answer(ctx, it.in)
+	view := s.startProgress(ctx, it)
+	reply, quiet, files, err := s.answer(ctx, it.in, it.out, view.onTool(ctx))
 	if err != nil {
 		slog.Error("chat turn failed", "chat", it.in.ChatID, "err", err)
-		reply = grok.UserFacing(err)
+		reply, quiet, files = grok.UserFacing(err), false, nil
 	}
+	// The answer is shown first; the files follow it, each quoting the user's message.
+	defer func() { s.flushFiles(ctx, it.out, it.in.ChatID, it.in.MessageID, files) }()
 	if strings.TrimSpace(reply) == "" {
-		reply = "处理失败：没有得到回复。"
+		if quiet {
+			// The turn only reacted: the reaction is the answer, so the progress message goes away.
+			if view != nil {
+				_ = view.Delete(ctx)
+			}
+			return
+		}
+		reply = emptyReplyText
+	}
+	if view != nil {
+		// Finish falls back to new messages itself and logs its own failure; do not resend.
+		_ = view.Finish(ctx, reply)
+		return
 	}
 	s.send(ctx, it.out, it.in.ChatID, reply)
 }
 
-func (s *Service) answer(ctx context.Context, in platform.Inbound) (string, error) {
-	if cmd, arg, ok := parseCommand(in.Text); ok {
-		return s.command(ctx, in, cmd, arg)
+// answer returns the text to show and the files to send after it. quiet means the turn was
+// answered by a reaction alone, so an empty text is not a failure.
+func (s *Service) answer(ctx context.Context, in platform.Inbound, out platform.Replier, onTool func(grok.ToolUse)) (text string, quiet bool, files []actions.File, err error) {
+	if cmd, arg, ok := parseInboundCommand(in); ok {
+		text, err = s.command(ctx, in, cmd, arg)
+		return text, false, nil, err
 	}
-	return s.chat(ctx, in)
+	images, failure := s.loadImages(ctx, in)
+	if failure != "" {
+		return failure, false, nil, nil
+	}
+	return s.chat(ctx, in, out, images, onTool)
 }
 
 func (s *Service) command(ctx context.Context, in platform.Inbound, cmd, arg string) (string, error) {
@@ -230,11 +273,36 @@ func (s *Service) modelCommand(ctx context.Context, in platform.Inbound, arg str
 
 // chat applies write grants from the message, runs the turn, and adds the
 // confirmations before the reply and the /reset reminder after it.
-func (s *Service) chat(ctx context.Context, in platform.Inbound) (string, error) {
+// quiet is true when Grok reacted and had nothing to add: reply then holds only the
+// confirmations (a grant must always be confirmed), which may be empty.
+func (s *Service) chat(ctx context.Context, in platform.Inbound, out platform.Replier, images []grok.Image, onTool func(grok.ToolUse)) (reply string, quiet bool, files []actions.File, err error) {
 	notes := s.applyGrants(ctx, in.Text)
-	reply, err := s.chatTurn(ctx, in)
+	if in.Skipped {
+		notes = append([]string{skippedNote}, notes...)
+	}
+	res, err := s.chatTurn(ctx, in, out, images, onTool)
 	if err != nil {
-		return "", err
+		return "", false, nil, err
+	}
+	// The single place that decides whether the turn produced anything to show. It runs
+	// before notes and the reminder are added around the reply, so they cannot hide an empty answer.
+	text := strings.TrimSpace(res.text)
+	empty := text == "" || text == noReply
+	if empty && res.reacted {
+		if res.rebuilt {
+			notes = append(notes, rebuiltNotice)
+		}
+		if mentionsPath(in.Text) && s.needsReset(ctx, in) {
+			notes = append(notes, resetReminder)
+		}
+		return strings.Join(notes, "\n"), true, res.files, nil
+	}
+	reply = res.text
+	if empty {
+		reply = emptyReplyText
+	}
+	if res.rebuilt {
+		reply = rebuiltNotice + "\n\n" + reply
 	}
 	if len(notes) > 0 {
 		reply = strings.Join(notes, "\n") + "\n\n" + reply
@@ -242,7 +310,7 @@ func (s *Service) chat(ctx context.Context, in platform.Inbound) (string, error)
 	if mentionsPath(in.Text) && s.needsReset(ctx, in) {
 		reply += "\n\n" + resetReminder
 	}
-	return reply, nil
+	return reply, false, res.files, nil
 }
 
 // needsReset reports whether file tools are available but this chat's session predates them.
@@ -254,14 +322,29 @@ func (s *Service) needsReset(ctx context.Context, in platform.Inbound) bool {
 	return err == nil && chat.SessionID != "" && chat.Sandbox != sandbox.ProfileName
 }
 
-func (s *Service) chatTurn(ctx context.Context, in platform.Inbound) (string, error) {
+// rebuiltNotice opens a reply that was answered in a new session because the old one was gone.
+const rebuiltNotice = "之前的上下文已经失效，这是新的一段对话。"
+
+// chatResult is the outcome of one chat turn.
+type chatResult struct {
+	text    string
+	reacted bool           // Grok put a reaction on the user's message
+	files   []actions.File // files Grok asked to send, in call order
+	rebuilt bool           // the answer came from a new session after the old one went missing
+}
+
+func (s *Service) chatTurn(ctx context.Context, in platform.Inbound, out platform.Replier, images []grok.Image, onTool func(grok.ToolUse)) (chatResult, error) {
 	chat, err := s.Store.Chat(ctx, in.Platform, in.ChatID)
 	if err != nil {
-		return "", err
+		return chatResult{}, err
 	}
-	base := grok.ReplyOptions{Model: chat.Model, Prompt: in.Text, WebSearch: s.WebSearch}
+	// The images stay in base so a rebuilt session gets them again.
+	base := grok.ReplyOptions{Model: chat.Model, Prompt: in.Text, WebSearch: s.WebSearch, OnTool: onTool, Images: images}
+	if len(images) > 0 {
+		base.Prompt = imagePrompt(in.Text, len(images))
+	}
 	if chat.SessionID == "" {
-		return s.startSession(ctx, in, base)
+		return s.startSession(ctx, in, out, base)
 	}
 	opts := base
 	opts.SessionID = chat.SessionID
@@ -273,46 +356,81 @@ func (s *Service) chatTurn(ctx context.Context, in platform.Inbound) (string, er
 			opts.WriteDirs = rw
 		}
 	}
-	result, err := s.Engine.Reply(ctx, opts)
+	res, err := s.reply(ctx, in, out, opts)
 	if err != nil && sessionMissing(err) {
-		text, err := s.startSession(ctx, in, base)
+		res, err := s.startSession(ctx, in, out, base)
 		if err != nil {
-			return "", err
+			return chatResult{}, err
 		}
-		return "之前的上下文已经失效，这是新的一段对话。\n\n" + text, nil
+		res.rebuilt = true
+		return res, nil
 	}
 	if err != nil {
-		return "", err
+		return chatResult{}, err
 	}
-	if err := s.Store.SetSession(ctx, in.Platform, in.ChatID, result.SessionID); err != nil {
-		return "", err
+	if err := s.Store.SetSession(ctx, in.Platform, in.ChatID, res.sessionID); err != nil {
+		return chatResult{}, err
 	}
-	return result.Text, nil
+	return res.chatResult, nil
 }
 
 // startSession runs the turn in a new Grok session and records the sandbox it was created with.
-func (s *Service) startSession(ctx context.Context, in platform.Inbound, opts grok.ReplyOptions) (string, error) {
+func (s *Service) startSession(ctx context.Context, in platform.Inbound, out platform.Replier, opts grok.ReplyOptions) (chatResult, error) {
 	sessionID, err := newUUID()
 	if err != nil {
-		return "", err
+		return chatResult{}, err
 	}
 	opts.SessionID = sessionID
 	opts.NewSession = true
 	profile := s.newSessionOptions(ctx, &opts)
-	result, err := s.Engine.Reply(ctx, opts)
+	res, err := s.reply(ctx, in, out, opts)
 	if err != nil {
-		return "", err
+		return chatResult{}, err
 	}
-	if err := s.Store.StartSession(ctx, in.Platform, in.ChatID, result.SessionID, profile); err != nil {
-		return "", err
+	if err := s.Store.StartSession(ctx, in.Platform, in.ChatID, res.sessionID, profile); err != nil {
+		return chatResult{}, err
 	}
-	return result.Text, nil
+	return res.chatResult, nil
+}
+
+// replyResult is a chat result together with the session grok answered in.
+type replyResult struct {
+	chatResult
+	sessionID string
+}
+
+// reply runs one grok call inside its own turn. The turn opens just before the call, once opts
+// says which tools this session gets, and its token ends when the call returns. The reaction
+// and queued files are those of this call alone.
+func (s *Service) reply(ctx context.Context, in platform.Inbound, out platform.Replier, opts grok.ReplyOptions) (replyResult, error) {
+	turn, env, end := s.beginTurn(in, out, opts.FileTools)
+	defer end()
+	result, err := s.Engine.Reply(ctx, withTurn(opts, turn, env))
+	if err != nil {
+		return replyResult{}, err
+	}
+	res := replyResult{chatResult: chatResult{text: result.Text}, sessionID: result.SessionID}
+	if turn != nil {
+		res.reacted = turn.Reacted()
+		res.files = turn.Files()
+	}
+	return res, nil
 }
 
 func (s *Service) send(ctx context.Context, out platform.Replier, chatID, text string) {
 	if err := out.Send(ctx, chatID, text); err != nil {
-		slog.Error("send failed", "chat", chatID, "err", err)
+		slog.Error("send failed", "chat", chatID, "err", safeErr(err))
 	}
+}
+
+// safeErr renders an error for logs without any request URL. Platform HTTP clients return
+// *url.Error whose text embeds the request URL, and a Telegram URL contains the bot token.
+func safeErr(err error) string {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return urlErr.Op + ": " + urlErr.Err.Error()
+	}
+	return err.Error()
 }
 
 func parseCommand(text string) (cmd, arg string, ok bool) {
@@ -335,7 +453,7 @@ func parseCommand(text string) (cmd, arg string, ok bool) {
 }
 
 func helpText(version string) string {
-	text := `直接发文字，我会接着这个聊天的上下文回复。
+	text := `直接发文字或图片，我会接着这个聊天的上下文回复。
 
 /model
     查看可用模型和当前模型

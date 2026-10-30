@@ -96,6 +96,29 @@ func (p Policy) CheckDir(raw string) (string, error) {
 	return real, nil
 }
 
+// Deny lists what Grok may not read: paths, plus "**/" patterns that match by
+// file name anywhere. The sandbox profile and CheckSendable both use it, so the
+// bot never sends a file the sandbox would refuse to read.
+func (p Policy) Deny() []string {
+	all := []string{
+		p.AuthPath,
+		filepath.Join(p.Home, ".ssh"),
+		p.EnvFile,
+		filepath.Join(p.DataDir, "bot.db"),
+		filepath.Join(p.DataDir, "bot.db-wal"),
+		filepath.Join(p.DataDir, "bot.db-shm"),
+		"**/.env",
+		"**/*.pem",
+	}
+	deny := all[:0]
+	for _, item := range all {
+		if item != "" {
+			deny = append(deny, item)
+		}
+	}
+	return deny
+}
+
 // resolve follows symlinks when the path exists so comparisons use real paths.
 func resolve(path string) string {
 	path = filepath.Clean(path)
@@ -123,16 +146,6 @@ func Render(readWrite []string, p Policy) string {
 // render leaves out the deny list when grok cannot enforce it; grok refuses
 // to start a profile whose deny list it cannot apply.
 func render(readWrite []string, p Policy, withDeny bool) string {
-	deny := []string{
-		p.AuthPath,
-		filepath.Join(p.Home, ".ssh"),
-		p.EnvFile,
-		filepath.Join(p.DataDir, "bot.db"),
-		filepath.Join(p.DataDir, "bot.db-wal"),
-		filepath.Join(p.DataDir, "bot.db-shm"),
-		"**/.env",
-		"**/*.pem",
-	}
 	var b strings.Builder
 	b.WriteString(marker + "\n")
 	b.WriteString("[profiles." + ProfileName + "]\n")
@@ -141,7 +154,7 @@ func render(readWrite []string, p Policy, withDeny bool) string {
 	b.WriteString("restrict_network = false\n")
 	b.WriteString("read_write = " + tomlList(readWrite) + "\n")
 	if withDeny {
-		b.WriteString("deny = " + tomlList(deny) + "\n")
+		b.WriteString("deny = " + tomlList(p.Deny()) + "\n")
 	}
 	return b.String()
 }

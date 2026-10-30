@@ -350,3 +350,18 @@ func TestNoBwrapGrantExplains(t *testing.T) {
 		t.Fatalf("%#v", got)
 	}
 }
+
+func TestEmptyReplyWithGrantStillReportsFailure(t *testing.T) {
+	svc, engine, _ := sandboxService(t)
+	engine.replyFor = func(opts grok.ReplyOptions) (grok.HeadlessResult, error) {
+		return grok.HeadlessResult{SessionID: opts.SessionID}, nil
+	}
+	dir, real := realDir(t)
+	rec := &recorder{}
+	say(svc, rec, "允许写入 "+dir+"，写个文件")
+	got := rec.wait(t, 1)
+	want := "已允许写入 " + real + "。\n\n处理失败：没有得到回复。"
+	if got[0] != want {
+		t.Fatalf("got %q, want %q", got[0], want)
+	}
+}

@@ -2,8 +2,6 @@ package telegram
 
 import (
 	"context"
-	"fmt"
-	"strconv"
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -41,6 +39,8 @@ func (b *Bot) Run(ctx context.Context, handler func(context.Context, platform.In
 		<-ctx.Done()
 		b.api.StopReceivingUpdates()
 	}()
+	group := newAlbums(ctx, handler)
+	defer group.stop()
 	for update := range stream {
 		msg := update.Message
 		if msg == nil || msg.From == nil {
@@ -49,17 +49,13 @@ func (b *Bot) Run(ctx context.Context, handler func(context.Context, platform.In
 		if msg.Chat.Type != "private" {
 			continue
 		}
-		text := strings.TrimSpace(msg.Text)
-		media := msg.Photo != nil || msg.Voice != nil || msg.Audio != nil || msg.Video != nil || msg.Document != nil || msg.Sticker != nil || msg.VideoNote != nil
-		in := platform.Inbound{
-			Platform:    platform.Telegram,
-			ChatID:      strconv.FormatInt(msg.Chat.ID, 10),
-			MessageID:   strconv.Itoa(msg.MessageID),
-			UserID:      strconv.FormatInt(msg.From.ID, 10),
-			Text:        text,
-			TextMessage: text != "" && !media,
+		in := b.inbound(msg)
+		if msg.MediaGroupID != "" {
+			// Album parts carry the caption on one message only; keep it for the merge even
+			// when that part is not a picture.
+			in.Text = strings.TrimSpace(msg.Caption)
 		}
-		handler(ctx, in, &messageReply{Bot: b, messageID: msg.MessageID})
+		group.add(in, msg.MediaGroupID, &messageReply{Bot: b, messageID: msg.MessageID})
 	}
 	return ctx.Err()
 }
@@ -79,24 +75,11 @@ func (r *messageReply) Send(ctx context.Context, chatID, text string) error {
 }
 
 func (b *Bot) send(ctx context.Context, chatID, text string, messageID int) error {
-	id, err := strconv.ParseInt(chatID, 10, 64)
-	if err != nil {
-		return fmt.Errorf("chat id: %w", err)
-	}
 	for _, chunk := range platform.Split(text, chunkLimit) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		params := tgbotapi.Params{
-			"chat_id":                  strconv.FormatInt(id, 10),
-			"text":                     chunk,
-			"disable_web_page_preview": "true",
-		}
-		if messageID > 0 {
-			// MakeRequest supports current Bot API fields without upgrading the SDK.
-			params["reply_parameters"] = fmt.Sprintf(`{"message_id":%d,"allow_sending_without_reply":true}`, messageID)
-		}
-		if _, err := b.api.MakeRequest("sendMessage", params); err != nil {
+		if _, err := b.sendOne(chatID, chunk, messageID); err != nil {
 			return err
 		}
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -9,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/rshun/grok-bot/internal/actions"
 	"github.com/rshun/grok-bot/internal/config"
 	"github.com/rshun/grok-bot/internal/core"
 	"github.com/rshun/grok-bot/internal/grok"
@@ -33,6 +35,16 @@ func main() {
 	if err := os.MkdirAll(workspace, 0o750); err != nil {
 		slog.Error("data dir", "err", err)
 		os.Exit(1)
+	}
+	// Prompt files of turns with images live here only while grok runs; only the bot may read them.
+	inbox := filepath.Join(cfg.DataDir, "inbox")
+	if err := os.MkdirAll(inbox, 0o700); err != nil {
+		slog.Error("inbox dir", "err", err)
+		os.Exit(1)
+	}
+	// MkdirAll keeps the mode of a directory that already exists.
+	if err := os.Chmod(inbox, 0o700); err != nil {
+		slog.Warn("inbox dir mode", "err", err)
 	}
 	db, err := store.Open(cfg.DataDir, cfg.DefaultModel)
 	if err != nil {
@@ -68,8 +80,31 @@ func main() {
 		BillingURL: cfg.BillingURL,
 		UserURL:    cfg.UserURL,
 		Timeout:    cfg.GrokTimeout,
+		InboxDir:   inbox,
+	}
+	// The local MCP server lets grok act on the chat during a turn. Chat keeps working without it.
+	// actionsForSvc stays nil when the server cannot listen or grok cannot be pointed at it.
+	var actionsForSvc *actions.Server
+	if actionsSrv, err := actions.Listen("127.0.0.1:0"); err != nil {
+		slog.Error("actions listen; chat actions are off", "err", err)
+	} else {
+		switch err := actions.WriteConfig(filepath.Join(workspace, ".grok", "config.toml"), actionsSrv.Port()); {
+		case err == nil:
+			actionsForSvc = actionsSrv
+		case errors.Is(err, actions.ErrUnmanaged):
+			slog.Warn("workspace .grok/config.toml was not written by the bot; chat actions are off")
+		default:
+			slog.Error("write grok config; chat actions are off", "err", err)
+		}
+		if actionsForSvc == nil {
+			_ = actionsSrv.Close()
+		}
+	}
+	if actionsForSvc != nil {
+		defer actionsForSvc.Close()
 	}
 	svc := &core.Service{
+		Actions:         actionsForSvc,
 		Store:           db,
 		Engine:          engine,
 		AllowedUsers:    map[string]map[string]struct{}{},
@@ -117,6 +152,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	slog.Info("listening", logArgs...)
+	if actionsForSvc != nil {
+		go func() {
+			if err := actionsForSvc.Serve(ctx); err != nil {
+				slog.Error("actions server", "err", err)
+			}
+		}()
+	}
 	go svc.RunScheduler(ctx, 30*time.Second)
 	errCh := make(chan error, len(runners))
 	for _, item := range runners {

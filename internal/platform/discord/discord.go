@@ -201,21 +201,7 @@ func (b *Bot) send(ctx context.Context, chatID, text, messageID string) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		out := &discordgo.MessageSend{
-			Content:         chunk,
-			Flags:           discordgo.MessageFlagsSuppressEmbeds,
-			AllowedMentions: nobody(),
-		}
-		if messageID != "" {
-			failIfMissing := false
-			out.Reference = &discordgo.MessageReference{
-				MessageID:       messageID,
-				ChannelID:       chatID,
-				FailIfNotExists: &failIfMissing,
-			}
-		}
-		_, err := b.session.ChannelMessageSendComplex(chatID, out)
-		if err != nil {
+		if _, err := b.sendOne(ctx, chatID, chunk, messageID); err != nil {
 			return err
 		}
 	}
@@ -364,7 +350,9 @@ func messageInbound(m *discordgo.MessageCreate, selfID string) (platform.Inbound
 		return platform.Inbound{}, false
 	}
 	text := strings.TrimSpace(m.Content)
-	media := len(m.Attachments) > 0 || len(m.StickerItems) > 0 || m.Poll != nil || m.Flags&discordgo.MessageFlagsIsVoiceMessage != 0
+	images, skipped := attachmentImages(m.Attachments)
+	other := len(m.StickerItems) > 0 || m.Poll != nil || m.Flags&discordgo.MessageFlagsIsVoiceMessage != 0
+	media := len(m.Attachments) > 0 || other
 	if text == "" && !media {
 		return platform.Inbound{}, false
 	}
@@ -374,6 +362,8 @@ func messageInbound(m *discordgo.MessageCreate, selfID string) (platform.Inbound
 		MessageID:   m.ID,
 		UserID:      m.Author.ID,
 		Text:        text,
-		TextMessage: text != "" && !media,
+		TextMessage: len(images) > 0 || (text != "" && !media),
+		Images:      images,
+		Skipped:     skipped || other,
 	}, true
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rshun/grok-bot/internal/actions"
 	"github.com/rshun/grok-bot/internal/grok"
 	"github.com/rshun/grok-bot/internal/platform"
 	"github.com/rshun/grok-bot/internal/schedule"
@@ -250,15 +251,16 @@ func (s *Service) runDue(ctx context.Context) {
 }
 
 // runTask answers a task in a fresh session that is never saved as the chat's session.
-func (s *Service) runTask(ctx context.Context, t store.Task) string {
+// It returns the message to send and the files the run queued.
+func (s *Service) runTask(ctx context.Context, in platform.Inbound, out platform.Replier, t store.Task) (string, []actions.File) {
 	header := taskHeader(t)
 	chat, err := s.Store.Chat(ctx, t.Platform, t.ChatID)
 	if err != nil {
-		return header + "\n\n" + grok.UserFacing(err)
+		return header + "\n\n" + grok.UserFacing(err), nil
 	}
 	sessionID, err := newUUID()
 	if err != nil {
-		return header + "\n\n" + grok.UserFacing(err)
+		return header + "\n\n" + grok.UserFacing(err), nil
 	}
 	opts := grok.ReplyOptions{
 		SessionID:  sessionID,
@@ -267,13 +269,23 @@ func (s *Service) runTask(ctx context.Context, t store.Task) string {
 		Prompt:     t.Prompt,
 		WebSearch:  s.WebSearch,
 	}
-	s.newSessionOptions(ctx, &opts)
+	profile := s.newSessionOptions(ctx, &opts)
+	turn, env, end := s.beginTurn(in, out, profile != "")
+	defer end()
+	opts = withTurn(opts, turn, env)
 	result, err := s.Engine.Reply(ctx, opts)
 	if err != nil {
 		slog.Error("task run failed", "task", t.ID, "err", err)
-		return header + "\n\n" + grok.UserFacing(err)
+		return header + "\n\n" + grok.UserFacing(err), nil
 	}
-	return header + "\n\n" + result.Text
+	var files []actions.File
+	if turn != nil {
+		files = turn.Files()
+	}
+	if strings.TrimSpace(result.Text) == "" {
+		return header + "\n\n" + emptyReplyText, files
+	}
+	return header + "\n\n" + result.Text, files
 }
 
 func taskHeader(t store.Task) string {
