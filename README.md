@@ -59,6 +59,7 @@ go test -mod=readonly ./...
 - 服务器没有安装 bubblewrap（`bwrap`）时，禁止读取的列表无法执行，bot 会自动关闭文件功能：Grok 读写不了任何文件，聊天、联网搜索、定时任务照常可用，已有会话的上下文也保留。`/dir` 和授权回复会说明原因；授权照常保存，装上 `sudo apt install -y bubblewrap` 后下一条消息就会生效，不用重启服务。
 - v0.2.0 之前的会话保留上下文，但不能使用文件功能。在这类会话里提到路径时，回复末尾会提醒你发送 `/reset`。
 - **已知风险（已接受）**：Grok 能读服务用户能读的一切，同时又能打开网页。恶意网页可能诱导 Grok 读取本机文件并通过网址发出去。请用专门的系统用户运行服务，不要让它能读到不该给 Grok 看的文件。
+- bot 不再把自己的 token 和配置（`TELEGRAM_BOT_TOKEN`、`DISCORD_BOT_TOKEN`、允许名单、`DATA_DIR`、`BOT_ENV_FILE` 等）传给 grok，Grok 读 `/proc/self/environ` 也拿不到 bot token。`GROK_*` 开头的设置和 `HOME`、`PATH`、语言、代理等通用变量照常传下去。
 
 ### 定时任务
 

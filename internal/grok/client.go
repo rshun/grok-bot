@@ -489,16 +489,36 @@ func findToken(v any) string {
 	return ""
 }
 
+// botEnvKeys are the bot's own settings from config.Load. grok and its MCP
+// children inherit this environment and could read /proc/self/environ, so the
+// tokens and the rest of the bot config are dropped. GROK_* settings stay:
+// they hold no secrets and share a prefix with the grok CLI's own variables.
+var botEnvKeys = map[string]bool{
+	"TELEGRAM_BOT_TOKEN":       true,
+	"DISCORD_BOT_TOKEN":        true,
+	"ALLOWED_USER_IDS":         true,
+	"DISCORD_ALLOWED_USER_IDS": true,
+	"DATA_DIR":                 true,
+	"DEFAULT_MODEL":            true,
+	"WEB_SEARCH":               true,
+	"BOT_ENV_FILE":             true,
+	"TIMEZONE":                 true,
+	"QUEUE_LIMIT":              true,
+	"TASK_LIMIT":               true,
+	"TASK_MIN_INTERVAL":        true,
+}
+
 func envWithoutUpdate() []string {
-	const key = "GROK_DISABLE_AUTOUPDATER="
+	const key = "GROK_DISABLE_AUTOUPDATER"
 	out := make([]string, 0, len(os.Environ())+1)
 	for _, item := range os.Environ() {
-		if strings.HasPrefix(item, key) {
+		name, _, _ := strings.Cut(item, "=")
+		if name == key || botEnvKeys[name] {
 			continue
 		}
 		out = append(out, item)
 	}
-	return append(out, key+"1")
+	return append(out, key+"=1")
 }
 
 func firstLine(text string) string {
