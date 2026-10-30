@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  amd64:
+  release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,16 +17,45 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Test
-        run: go test ./...
-      - name: Build linux/amd64
+        run: go test -mod=readonly ./...
+      - name: Build Linux, Windows, and macOS binaries
         run: |
+          set -euo pipefail
+          mkdir -p dist
+          ldflags="-s -w -X main.version=${GITHUB_REF_NAME}"
+
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-            go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
-            -o grok-bot ./cmd/grok-bot
-      - name: Publish
+            go build -mod=readonly -trimpath -ldflags "$ldflags" \
+            -o dist/grok-bot-linux-amd64 ./cmd/grok-bot
+          cp dist/grok-bot-linux-amd64 dist/grok-bot
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+            go build -mod=readonly -trimpath -ldflags "$ldflags" \
+            -o dist/grok-bot-linux-arm64 ./cmd/grok-bot
+
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+            go build -mod=readonly -trimpath -ldflags "$ldflags" \
+            -o dist/grok-bot-windows-amd64.exe ./cmd/grok-bot
+
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
+            go build -mod=readonly -trimpath -ldflags "$ldflags" \
+            -o dist/grok-bot-darwin-arm64 ./cmd/grok-bot
+
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 \
+            go build -mod=readonly -trimpath -ldflags "$ldflags" \
+            -o dist/grok-bot-darwin-amd64 ./cmd/grok-bot
+
+          cd dist
+          sha256sum grok-bot* > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          cat SHA256SUMS
+      - name: Publish Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" grok-bot \
+          set -euo pipefail
+          notes="$(printf '## 构建产物 (Linux / Windows / macOS)\n\n```text\n%s\n```\n' "$(cat dist/SHA256SUMS)")"
+          gh release create "${GITHUB_REF_NAME}" dist/* \
             --title "${GITHUB_REF_NAME}" \
-            --notes "linux/amd64 static binary"
+            --generate-notes \
+            --notes "$notes"
