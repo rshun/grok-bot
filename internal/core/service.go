@@ -49,6 +49,8 @@ type Service struct {
 	TaskMinInterval time.Duration
 	// ProgressInterval is the shortest gap between edits of a progress message; 0 means 3 seconds.
 	ProgressInterval time.Duration
+	// ImageLoadTimeout bounds downloading the pictures of one message; 0 means 3 minutes.
+	ImageLoadTimeout time.Duration
 	// Now is the clock for scheduling; nil means time.Now.
 	Now func() time.Time
 
@@ -211,7 +213,7 @@ func (s *Service) answer(ctx context.Context, in platform.Inbound, out platform.
 		text, err = s.command(ctx, in, cmd, arg)
 		return text, false, nil, err
 	}
-	images, failure := loadImages(ctx, in)
+	images, failure := s.loadImages(ctx, in)
 	if failure != "" {
 		return failure, false, nil, nil
 	}

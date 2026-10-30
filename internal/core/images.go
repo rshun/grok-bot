@@ -58,14 +58,18 @@ func imagePrompt(text string, n int) string {
 	}
 }
 
-// imageLoadTimeout bounds downloading all pictures of one message. The handler context has no
-// deadline and a stalled transfer would otherwise hold the chat's lane forever.
-var imageLoadTimeout = 3 * time.Minute
+// defaultImageLoadTimeout bounds downloading all pictures of one message. The handler context
+// has no deadline and a stalled transfer would otherwise hold the chat's lane forever.
+const defaultImageLoadTimeout = 3 * time.Minute
 
 // loadImages downloads the pictures of a message. When it cannot, failure is the fixed text to
 // show the user. Only here are the pictures fetched, after the allowlist has passed.
-func loadImages(ctx context.Context, in platform.Inbound) (images []grok.Image, failure string) {
-	ctx, cancel := context.WithTimeout(ctx, imageLoadTimeout)
+func (s *Service) loadImages(ctx context.Context, in platform.Inbound) (images []grok.Image, failure string) {
+	timeout := s.ImageLoadTimeout
+	if timeout <= 0 {
+		timeout = defaultImageLoadTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	for _, img := range in.Images {
 		if img.Load == nil {

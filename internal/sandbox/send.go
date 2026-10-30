@@ -102,7 +102,7 @@ func sendReadError(err error) error {
 }
 
 // denied reports whether path, or any directory above it, is on the deny list,
-// or lies in a kernel directory (see kernelDirs).
+// lies in a kernel directory (see kernelDirs) or in DATA_DIR.
 // A "**/" pattern matches the file name and every directory name above it, so
 // files inside a directory called ".env" or "keys.pem" are refused too.
 // Names are compared ignoring case, because macOS and Windows treat ".ENV" and
@@ -112,6 +112,12 @@ func (p Policy) denied(path string) bool {
 		if within(path, dir) {
 			return true
 		}
+	}
+	// DATA_DIR holds the database, the bot's grok workspace and the inbox, where other
+	// chats' prompt files (with their images) sit while a turn runs. None of it is ever
+	// meant for a chat, so it is refused for sending even where the sandbox lets Grok read.
+	if p.DataDir != "" && within(path, resolve(p.DataDir)) {
+		return true
 	}
 	var targetInfos []os.FileInfo
 	for _, entry := range p.Deny() {

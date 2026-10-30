@@ -66,9 +66,65 @@ func testAlbums(ctx context.Context, s *sink) *albums {
 	return a
 }
 
+func cleanup(t *testing.T, a *albums) *albums {
+	t.Cleanup(a.stop)
+	return a
+}
+
+func TestTimerFlushedAlbumStaysAheadOfNextMessage(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var order []string
+	handler := func(_ context.Context, in platform.Inbound, _ platform.Replier) {
+		if len(in.Images) > 0 {
+			close(entered)
+			<-release // the album is still being handed on when the text arrives
+		}
+		mu.Lock()
+		order = append(order, in.MessageID)
+		mu.Unlock()
+	}
+	a := cleanup(t, newAlbums(context.Background(), handler))
+	a.quiet = 10 * time.Millisecond
+	a.add(albumPhoto("1", "pics"), "g", namedReply("1"))
+	<-entered
+	done := make(chan struct{})
+	go func() {
+		a.add(platform.Inbound{ChatID: "9", MessageID: "2", Text: "and?", TextMessage: true}, "", namedReply("2"))
+		close(done)
+	}()
+	time.Sleep(30 * time.Millisecond)
+	close(release)
+	<-done
+	mu.Lock()
+	defer mu.Unlock()
+	if len(order) != 2 || order[0] != "1" || order[1] != "2" {
+		t.Fatalf("order %v", order)
+	}
+}
+
+func TestWaitingAlbumsLeaveOldestFirst(t *testing.T) {
+	for run := 0; run < 20; run++ { // map order is random; repeat to catch it
+		s := newSink()
+		a := cleanup(t, testAlbums(context.Background(), s))
+		a.quiet = time.Hour
+		for _, g := range []string{"g1", "g2", "g3"} {
+			a.add(albumPhoto(g, ""), g, namedReply(g))
+		}
+		a.add(platform.Inbound{ChatID: "9", MessageID: "t", Text: "hi", TextMessage: true}, "", namedReply("t"))
+		got := s.wait(t, 4)
+		for i, want := range []string{"g1", "g2", "g3", "t"} {
+			if got[i].in.MessageID != want {
+				t.Fatalf("run %d: position %d is %s, want %s", run, i, got[i].in.MessageID, want)
+			}
+		}
+	}
+}
+
 func TestAlbumMergesGroup(t *testing.T) {
 	s := newSink()
-	a := testAlbums(context.Background(), s)
+	a := cleanup(t, testAlbums(context.Background(), s))
 	a.add(albumPhoto("1", ""), "g", namedReply("1"))
 	a.add(albumPhoto("2", "what are these"), "g", namedReply("2"))
 	a.add(albumPhoto("3", ""), "g", namedReply("3"))
@@ -91,7 +147,7 @@ func TestAlbumMergesGroup(t *testing.T) {
 
 func TestAlbumWithoutCaptionUsesFirst(t *testing.T) {
 	s := newSink()
-	a := testAlbums(context.Background(), s)
+	a := cleanup(t, testAlbums(context.Background(), s))
 	a.add(albumPhoto("4", ""), "g", namedReply("4"))
 	a.add(albumPhoto("5", ""), "g", namedReply("5"))
 	got := s.wait(t, 1)
@@ -102,7 +158,7 @@ func TestAlbumWithoutCaptionUsesFirst(t *testing.T) {
 
 func TestAlbumKeepsAtMostMaxImages(t *testing.T) {
 	s := newSink()
-	a := testAlbums(context.Background(), s)
+	a := cleanup(t, testAlbums(context.Background(), s))
 	for i := 0; i < platform.MaxImages+2; i++ {
 		a.add(albumPhoto(string(rune('a'+i)), ""), "g", namedReply("x"))
 	}
@@ -114,7 +170,7 @@ func TestAlbumKeepsAtMostMaxImages(t *testing.T) {
 
 func TestAlbumWithoutPicturesIsNotUsable(t *testing.T) {
 	s := newSink()
-	a := testAlbums(context.Background(), s)
+	a := cleanup(t, testAlbums(context.Background(), s))
 	video := platform.Inbound{ChatID: "9", MessageID: "1", Text: "look", Skipped: true}
 	a.add(video, "g", namedReply("1"))
 	a.add(platform.Inbound{ChatID: "9", MessageID: "2", Skipped: true}, "g", namedReply("2"))
@@ -126,7 +182,7 @@ func TestAlbumWithoutPicturesIsNotUsable(t *testing.T) {
 
 func TestNonAlbumPassesThrough(t *testing.T) {
 	s := newSink()
-	a := testAlbums(context.Background(), s)
+	a := cleanup(t, testAlbums(context.Background(), s))
 	a.quiet = time.Hour
 	a.add(platform.Inbound{ChatID: "9", MessageID: "1", Text: "hi", TextMessage: true}, "", namedReply("1"))
 	if s.count() != 1 {
@@ -136,7 +192,7 @@ func TestNonAlbumPassesThrough(t *testing.T) {
 
 func TestPlainMessageFlushesWaitingAlbumFirst(t *testing.T) {
 	s := newSink()
-	a := testAlbums(context.Background(), s)
+	a := cleanup(t, testAlbums(context.Background(), s))
 	a.quiet = time.Hour
 	a.add(albumPhoto("1", "pics"), "g", namedReply("1"))
 	a.add(albumPhoto("2", ""), "g", namedReply("2"))

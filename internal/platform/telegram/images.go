@@ -46,12 +46,14 @@ func (b *Bot) images(msg *tgbotapi.Message) (images []platform.Image, skipped bo
 		images = append(images, b.image(best.FileID, "image/jpeg", "", int64(best.FileSize)))
 	}
 	if doc := msg.Document; doc != nil {
-		mime := strings.ToLower(strings.TrimSpace(doc.MimeType))
-		if mime == "" {
+		var mime string
+		if strings.TrimSpace(doc.MimeType) != "" {
+			mime = platform.ImageMIME(doc.MimeType)
+		} else {
 			// Telegram leaves the type out for some clients; the name is the only hint then.
 			mime = platform.ImageMIMEByName(doc.FileName)
 		}
-		if isImageMIME(mime) {
+		if mime != "" {
 			images = append(images, b.image(doc.FileID, mime, doc.FileName, int64(doc.FileSize)))
 		} else {
 			skipped = true
@@ -73,14 +75,6 @@ func hasMedia(msg *tgbotapi.Message) bool {
 // photoRank orders the sizes of one photo; the declared byte size is optional, so pixels count too.
 func photoRank(p tgbotapi.PhotoSize) int64 {
 	return int64(p.FileSize)<<32 | int64(p.Width*p.Height)
-}
-
-func isImageMIME(mime string) bool {
-	switch mime {
-	case "image/jpeg", "image/png", "image/gif", "image/webp":
-		return true
-	}
-	return false
 }
 
 func (b *Bot) image(fileID, mime, name string, size int64) platform.Image {

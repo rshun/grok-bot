@@ -65,6 +65,20 @@ func ReadImage(r io.Reader) ([]byte, error) {
 	return data, nil
 }
 
+// ImageMIME returns the canonical image type Grok takes for a stated content type, or "" when
+// it is not one of them. Parameters and case are ignored; the non-standard "image/jpg" that
+// some clients send counts as JPEG.
+func ImageMIME(contentType string) string {
+	mime := strings.ToLower(strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0]))
+	switch mime {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return mime
+	case "image/jpg":
+		return "image/jpeg"
+	}
+	return ""
+}
+
 // ImageMIMEByName returns the image type Grok takes for a file name's extension, or "" when
 // the extension is not one of them. It is only for attachments that state no type.
 func ImageMIMEByName(name string) string {

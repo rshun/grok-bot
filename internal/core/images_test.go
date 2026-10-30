@@ -202,11 +202,8 @@ func TestImagesResentWhenSessionIsRebuilt(t *testing.T) {
 }
 
 func TestStalledImageLoadIsBounded(t *testing.T) {
-	old := imageLoadTimeout
-	imageLoadTimeout = 50 * time.Millisecond
-	defer func() { imageLoadTimeout = old }()
-
 	svc, engine := testService(t)
+	svc.ImageLoadTimeout = 50 * time.Millisecond
 	rec := &recorder{}
 	stalled := platform.Image{MIME: "image/png", Load: func(ctx context.Context) ([]byte, error) {
 		<-ctx.Done() // a transfer that never finishes on its own

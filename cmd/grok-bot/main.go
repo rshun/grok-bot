@@ -42,6 +42,10 @@ func main() {
 		slog.Error("inbox dir", "err", err)
 		os.Exit(1)
 	}
+	// MkdirAll keeps the mode of a directory that already exists.
+	if err := os.Chmod(inbox, 0o700); err != nil {
+		slog.Warn("inbox dir mode", "err", err)
+	}
 	db, err := store.Open(cfg.DataDir, cfg.DefaultModel)
 	if err != nil {
 		slog.Error("store", "err", err)

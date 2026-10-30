@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 
@@ -19,13 +20,19 @@ type albums struct {
 	handler func(context.Context, platform.Inbound, platform.Replier)
 	quiet   time.Duration
 
+	// deliverMu serializes every handler call made through albums, so a timer-flushed album
+	// and the plain message after it reach the handler in order. Lock order: deliverMu, mu.
+	deliverMu sync.Mutex
+
 	mu      sync.Mutex
 	groups  map[string]*album // key: chat ID + "/" + group ID
+	seq     uint64
 	stopped bool
 }
 
 type album struct {
 	chatID string
+	seq    uint64 // creation order, so waiting albums of one chat leave in order
 	parts  []albumPart
 	timer  *time.Timer
 }
@@ -44,10 +51,14 @@ func newAlbums(ctx context.Context, handler func(context.Context, platform.Inbou
 // its caption.
 func (a *albums) add(in platform.Inbound, groupID string, reply platform.Replier) {
 	if groupID == "" {
+		a.deliverMu.Lock()
+		defer a.deliverMu.Unlock()
 		for _, g := range a.takeChat(in.ChatID) {
 			a.deliver(g)
 		}
-		a.handler(a.ctx, in, reply)
+		if !a.isStopped() {
+			a.handler(a.ctx, in, reply)
+		}
 		return
 	}
 	key := in.ChatID + "/" + groupID
@@ -58,7 +69,8 @@ func (a *albums) add(in platform.Inbound, groupID string, reply platform.Replier
 	}
 	g := a.groups[key]
 	if g == nil {
-		g = &album{chatID: in.ChatID}
+		a.seq++
+		g = &album{chatID: in.ChatID, seq: a.seq}
 		a.groups[key] = g
 		g.timer = time.AfterFunc(a.quiet, func() { a.flush(key, g) })
 	} else {
@@ -69,6 +81,8 @@ func (a *albums) add(in platform.Inbound, groupID string, reply platform.Replier
 
 // flush hands on one album once it has been quiet long enough.
 func (a *albums) flush(key string, g *album) {
+	a.deliverMu.Lock()
+	defer a.deliverMu.Unlock()
 	a.mu.Lock()
 	if a.stopped || a.groups[key] != g {
 		a.mu.Unlock()
@@ -79,7 +93,13 @@ func (a *albums) flush(key string, g *album) {
 	a.deliver(g)
 }
 
-// takeChat removes and returns the albums still waiting in one chat.
+func (a *albums) isStopped() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.stopped
+}
+
+// takeChat removes and returns the albums still waiting in one chat, oldest first.
 func (a *albums) takeChat(chatID string) []*album {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -91,11 +111,15 @@ func (a *albums) takeChat(chatID string) []*album {
 			out = append(out, g)
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].seq < out[j].seq })
 	return out
 }
 
-// stop drops every waiting album; nothing is handed on after it returns.
+// stop drops every waiting album. It waits for a delivery already under way, so nothing is
+// handed on after it returns.
 func (a *albums) stop() {
+	a.deliverMu.Lock()
+	defer a.deliverMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.stopped = true

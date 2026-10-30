@@ -132,6 +132,28 @@ func TestCheckSendableAccepts(t *testing.T) {
 	}
 }
 
+func TestCheckSendableRefusesDataDir(t *testing.T) {
+	p := testPolicy(t)
+	if p.DataDir == "" {
+		t.Fatal("test policy has no DataDir")
+	}
+	for _, rel := range []string{
+		filepath.Join("inbox", "prompt-123.json"),
+		filepath.Join("workspace", ".grok", "config.toml"),
+		"other.txt",
+	} {
+		file := filepath.Join(p.DataDir, rel)
+		writeFile(t, file, "x")
+		if _, _, err := p.CheckSendable(file); err == nil {
+			t.Fatalf("%s: sendable", rel)
+		}
+		if f, _, err := p.OpenSendable(file); err == nil {
+			f.Close()
+			t.Fatalf("%s: openable for sending", rel)
+		}
+	}
+}
+
 func TestCheckSendableRefusesKernelFiles(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("procfs is Linux only")

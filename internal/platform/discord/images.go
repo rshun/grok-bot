@@ -19,13 +19,8 @@ var imageClient = &http.Client{Timeout: 2 * time.Minute}
 // imageMIME returns the image type of an attachment, or "" when it is not an image Grok takes.
 // A stated content type decides; the file extension is used only when there is none.
 func imageMIME(a *discordgo.MessageAttachment) string {
-	if mime := strings.TrimSpace(strings.SplitN(a.ContentType, ";", 2)[0]); mime != "" {
-		mime = strings.ToLower(mime)
-		switch mime {
-		case "image/jpeg", "image/png", "image/gif", "image/webp":
-			return mime
-		}
-		return ""
+	if strings.TrimSpace(a.ContentType) != "" {
+		return platform.ImageMIME(a.ContentType)
 	}
 	return platform.ImageMIMEByName(a.Filename)
 }
