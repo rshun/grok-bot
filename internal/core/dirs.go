@@ -39,7 +39,7 @@ func (s *Service) dirCommand(ctx context.Context, in platform.Inbound, arg strin
 		if err != nil {
 			return err.Error(), nil
 		}
-		reply := fmt.Sprintf("已添加 %s（可读写）。新会话立即可用；已有会话可能需要 /reset。", path)
+		reply := fmt.Sprintf("已添加 %s（可读写）。", path)
 		if ready, _, reason := s.fileAccess(ctx); !ready {
 			reply += "\n文件功能当前不可用：" + reason
 		}
@@ -77,14 +77,6 @@ func (s *Service) dirList(ctx context.Context, in platform.Inbound) (string, err
 	ready, _, reason := s.fileAccess(ctx)
 	if !ready {
 		b.WriteString("\n文件功能当前不可用：" + reason)
-		return strings.TrimSpace(b.String()), nil
-	}
-	chat, err := s.Store.Chat(ctx, in.Platform, in.ChatID)
-	if err != nil {
-		return "", err
-	}
-	if chat.SessionID != "" && chat.Sandbox != sandbox.ProfileName {
-		b.WriteString("\n这个聊天的会话创建于开启文件功能之前，发送 /reset 后可以使用文件功能。")
 	}
 	return strings.TrimSpace(b.String()), nil
 }
@@ -192,13 +184,12 @@ func (s *Service) fileAccess(ctx context.Context) (ready bool, rw []string, reas
 			slog.Error("sandbox profile is not managed by the bot", "path", s.Sandbox.Path)
 			return false, nil, s.Sandbox.Path + " 不是 bot 生成的，请管理员手动合并 grokbot 配置。"
 		}
-		if errors.Is(err, sandbox.ErrDenyUnavailable) {
-			// Without bubblewrap the deny list cannot be enforced, so no file is readable at all.
-			slog.Warn("bubblewrap not found, file tools disabled")
-			return false, nil, "服务器没有安装 bubblewrap（bwrap），无法保护敏感文件，文件功能已关闭。"
+		if !errors.Is(err, sandbox.ErrDenyUnavailable) {
+			slog.Error("write sandbox profile", "err", err)
+			return false, nil, "写入沙箱配置失败。"
 		}
-		slog.Error("write sandbox profile", "err", err)
-		return false, nil, "写入沙箱配置失败。"
+		// Without bubblewrap the profile was still written without the read-deny list;
+		// Landlock still restricts writes and file tools remain enabled.
 	}
 	return true, rw, ""
 }

@@ -96,13 +96,10 @@ func TestNewSessionUsesSandbox(t *testing.T) {
 	}
 }
 
-func TestOldSessionKeepsContextWithoutFiles(t *testing.T) {
+func TestOldSessionGetsFileToolsWithoutReset(t *testing.T) {
 	svc, engine, _ := sandboxService(t)
 	ctx := context.Background()
 	if err := svc.Store.SetSession(ctx, "telegram", "9", "old"); err != nil {
-		t.Fatal(err)
-	}
-	if err := svc.Store.PutDir(ctx, t.TempDir(), "ro"); err != nil {
 		t.Fatal(err)
 	}
 	rec := &recorder{}
@@ -111,13 +108,8 @@ func TestOldSessionKeepsContextWithoutFiles(t *testing.T) {
 	engine.mu.Lock()
 	call := engine.calls[0]
 	engine.mu.Unlock()
-	if call.NewSession || call.SessionID != "old" || call.Sandbox != "" || call.FileTools {
+	if call.NewSession || call.SessionID != "old" || call.Sandbox != "" || !call.FileTools {
 		t.Fatalf("%#v", call)
-	}
-	say(svc, rec, "/dir")
-	got := rec.wait(t, 2)
-	if !strings.Contains(got[1], "/reset") {
-		t.Fatalf("%#v", got)
 	}
 }
 
@@ -242,8 +234,8 @@ func TestNaturalRevoke(t *testing.T) {
 	}
 }
 
-func TestOldSessionGrantRemindsReset(t *testing.T) {
-	svc, _, _ := sandboxService(t)
+func TestOldSessionGrantWorksImmediately(t *testing.T) {
+	svc, engine, _ := sandboxService(t)
 	ctx := context.Background()
 	if err := svc.Store.SetSession(ctx, "telegram", "9", "old"); err != nil {
 		t.Fatal(err)
@@ -252,11 +244,14 @@ func TestOldSessionGrantRemindsReset(t *testing.T) {
 	rec := &recorder{}
 	say(svc, rec, "允许写入 "+dir)
 	got := rec.wait(t, 1)
-	if !strings.HasPrefix(got[0], "已允许写入 "+real+"。") || !strings.HasSuffix(got[0], "\n\n"+wantReminder) {
+	if got[0] != "已允许写入 "+real+"。\n\npong" {
 		t.Fatalf("%#v", got)
 	}
-	if dirs, _ := svc.Store.Dirs(ctx); len(dirs) != 1 {
-		t.Fatalf("%#v", dirs)
+	engine.mu.Lock()
+	call := engine.calls[0]
+	engine.mu.Unlock()
+	if !call.FileTools || len(call.WriteDirs) != 1 || call.WriteDirs[0] != real {
+		t.Fatalf("%#v", call)
 	}
 	if chat, _ := svc.Store.Chat(ctx, "telegram", "9"); chat.SessionID != "old" {
 		t.Fatalf("%#v", chat)
@@ -296,7 +291,7 @@ func noBwrapService(t *testing.T) (*Service, *fakeEngine) {
 	return svc, engine
 }
 
-func TestNoBwrapNewSessionIsPlain(t *testing.T) {
+func TestNoBwrapStillEnablesFileTools(t *testing.T) {
 	svc, engine := noBwrapService(t)
 	rec := &recorder{}
 	say(svc, rec, "看看 /srv")
@@ -307,15 +302,15 @@ func TestNoBwrapNewSessionIsPlain(t *testing.T) {
 	engine.mu.Lock()
 	call := engine.calls[0]
 	engine.mu.Unlock()
-	if call.Sandbox != "" || call.FileTools {
+	if call.Sandbox != sandbox.ProfileName || !call.FileTools {
 		t.Fatalf("%#v", call)
 	}
-	if chat, _ := svc.Store.Chat(context.Background(), "telegram", "9"); chat.Sandbox != "" {
+	if chat, _ := svc.Store.Chat(context.Background(), "telegram", "9"); chat.Sandbox != sandbox.ProfileName {
 		t.Fatalf("%#v", chat)
 	}
 }
 
-func TestNoBwrapResumedSandboxSessionKeepsContext(t *testing.T) {
+func TestNoBwrapResumedSandboxSessionKeepsFileTools(t *testing.T) {
 	svc, engine := noBwrapService(t)
 	ctx := context.Background()
 	if err := svc.Store.StartSession(ctx, "telegram", "9", "s1", sandbox.ProfileName); err != nil {
@@ -327,27 +322,22 @@ func TestNoBwrapResumedSandboxSessionKeepsContext(t *testing.T) {
 	engine.mu.Lock()
 	call := engine.calls[0]
 	engine.mu.Unlock()
-	if call.NewSession || call.SessionID != "s1" || call.Sandbox != sandbox.ProfileName || call.FileTools {
+	if call.NewSession || call.SessionID != "s1" || call.Sandbox != sandbox.ProfileName || !call.FileTools {
 		t.Fatalf("%#v", call)
 	}
 }
 
-func TestNoBwrapGrantExplains(t *testing.T) {
+func TestNoBwrapGrantSucceeds(t *testing.T) {
 	svc, _ := noBwrapService(t)
 	dir, real := realDir(t)
 	rec := &recorder{}
 	say(svc, rec, "允许写入 "+dir)
 	got := rec.wait(t, 1)
-	if !strings.Contains(got[0], "已允许写入 "+real+"。") || !strings.Contains(got[0], "没有安装 bubblewrap") {
+	if !strings.Contains(got[0], "已允许写入 "+real+"。") || strings.Contains(got[0], "不可用") {
 		t.Fatalf("%#v", got)
 	}
 	if dirs, _ := svc.Store.Dirs(context.Background()); len(dirs) != 1 {
 		t.Fatalf("%#v", dirs)
-	}
-	say(svc, rec, "/dir")
-	got = rec.wait(t, 2)
-	if !strings.Contains(got[1], "没有安装 bubblewrap") {
-		t.Fatalf("%#v", got)
 	}
 }
 

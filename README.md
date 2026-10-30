@@ -56,8 +56,8 @@ go test -mod=readonly ./...
 - 可写名单所有聊天共用。不能授权写入 `/`、`/etc`、`/proc`、`/sys`、`/dev`、`/boot`、`/root`、`~/.grok`、`~/.ssh`、`DATA_DIR`，以及这些位置的上下级目录和包含 `BOT_ENV_FILE` 的目录；软链接按真实路径检查。
 - `/dir` 查看可写目录；`/dir add rw`、`/dir del` 是命令形式的兜底。
 - bot 会生成服务用户的 `~/.grok/sandbox.toml`（第一行是 `# managed by grok-bot; do not edit`）。如果这个文件已经存在且不是 bot 生成的，bot 不会覆盖它，文件功能保持关闭，`/dir` 会提示管理员手动合并 `grokbot` 配置。
-- 服务器没有安装 bubblewrap（`bwrap`）时，禁止读取的列表无法执行，bot 会自动关闭文件功能：Grok 读写不了任何文件，聊天、联网搜索、定时任务照常可用，已有会话的上下文也保留。`/dir` 和授权回复会说明原因；授权照常保存，装上 `sudo apt install -y bubblewrap` 后下一条消息就会生效，不用重启服务。
-- v0.2.0 之前的会话保留上下文，但不能使用文件功能。在这类会话里提到路径时，回复末尾会提醒你发送 `/reset`。
+- 服务器没有安装 bubblewrap（`bwrap`）时，沙箱会自动省略读取黑名单，文件读写与聊天、联网搜索、定时任务照常可用（写入仍受 Landlock 限制，发文件仍由 bot 检查黑名单）；装上 `sudo apt install -y bubblewrap` 后下一条消息自动启用沙箱读取黑名单，不用重启服务。
+- 已有会话无需发送 `/reset` 即可直接使用文件读写功能。
 - **已知风险（已接受）**：Grok 能读服务用户能读的一切，同时又能打开网页。恶意网页可能诱导 Grok 读取本机文件并通过网址发出去。请用专门的系统用户运行服务，不要让它能读到不该给 Grok 看的文件。
 - bot 不再把自己的 token 和配置（`TELEGRAM_BOT_TOKEN`、`DISCORD_BOT_TOKEN`、允许名单、`DATA_DIR`、`BOT_ENV_FILE` 等）传给 grok，Grok 读 `/proc/self/environ` 也拿不到 bot token。`GROK_*` 开头的设置和 `HOME`、`PATH`、语言、代理等通用变量照常传下去。
 
@@ -82,7 +82,7 @@ Grok 可以给你当前这条消息加一个表情，比如你说「好的谢谢
 Grok 可以把服务器上的文件发给你，例如「把 /srv/out/report.pdf 发给我」。先发回答，再按顺序发文件，每个文件都引用原消息；定时任务的文件跟在 `⏰ 定时任务` 结果后面。
 
 - 发文件和 Grok 读文件使用同一份禁止名单：grok 登录凭证、`~/.ssh`、`BOT_ENV_FILE`、`bot.db`、所有 `.env` 和 `.pem` 都发不出去。发文件另外拒绝 `DATA_DIR` 整个目录、`/proc`、`/sys`、`/dev` 下的文件和硬链接；软链接按真实路径检查，打开文件时不跟随软链接，发送时在已打开的文件上再校验一次。
-- 文件功能关闭时（非 Linux/macOS、没有 bubblewrap、`sandbox.toml` 不是 bot 生成的，或 v0.2.0 之前的会话）不能发文件。
+- 文件功能关闭时（非 Linux/macOS，或 `sandbox.toml` 不是 bot 生成的）不能发文件。
 - 每轮最多 10 个文件。Telegram 单个文件最大 50MB，10MB 以内的图片按照片发，更大或按照片发送失败时按文件发；Discord 单个文件最大 10MB。
 - 某个文件发送失败时只提示「文件 xxx 发送失败。」，不影响回答和其他文件。
 

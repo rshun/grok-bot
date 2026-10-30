@@ -313,13 +313,9 @@ func (s *Service) chat(ctx context.Context, in platform.Inbound, out platform.Re
 	return reply, false, res.files, nil
 }
 
-// needsReset reports whether file tools are available but this chat's session predates them.
+// needsReset is kept as false now that existing sessions also receive file tools directly.
 func (s *Service) needsReset(ctx context.Context, in platform.Inbound) bool {
-	if ready, _, _ := s.fileAccess(ctx); !ready {
-		return false
-	}
-	chat, err := s.Store.Chat(ctx, in.Platform, in.ChatID)
-	return err == nil && chat.SessionID != "" && chat.Sandbox != sandbox.ProfileName
+	return false
 }
 
 // rebuiltNotice opens a reply that was answered in a new session because the old one was gone.
@@ -350,11 +346,9 @@ func (s *Service) chatTurn(ctx context.Context, in platform.Inbound, out platfor
 	opts.SessionID = chat.SessionID
 	// A resumed session keeps the sandbox it was created with; grok refuses a different one.
 	opts.Sandbox = chat.Sandbox
-	if chat.Sandbox == sandbox.ProfileName {
-		if ready, rw, _ := s.fileAccess(ctx); ready {
-			opts.FileTools = true
-			opts.WriteDirs = rw
-		}
+	if ready, rw, _ := s.fileAccess(ctx); ready {
+		opts.FileTools = true
+		opts.WriteDirs = rw
 	}
 	res, err := s.reply(ctx, in, out, opts)
 	if err != nil && sessionMissing(err) {

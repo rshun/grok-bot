@@ -336,10 +336,10 @@ func TestReactOnlyStillSendsFiles(t *testing.T) {
 	}
 }
 
-func TestRebuiltSessionOffersFilesOfNewSandbox(t *testing.T) {
+func TestRebuiltSessionOffersFilesAndDropsFailedResumeFiles(t *testing.T) {
 	svc, engine, ts := grantService(t)
 	path := writeTemp(t, "a.txt", "hello")
-	// An old session from before the sandbox existed: it cannot use file tools.
+	stale := writeTemp(t, "stale.txt", "no")
 	if err := svc.Store.StartSession(context.Background(), "telegram", "9", "old", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -348,6 +348,7 @@ func TestRebuiltSessionOffersFilesOfNewSandbox(t *testing.T) {
 		token := tokenFrom(t, opts.Env)
 		if !opts.NewSession {
 			resumeTools = toolNames(t, ts, token)
+			callSendFile(t, ts, token, stale, "")
 			return grok.HeadlessResult{}, &grok.RunError{Message: "session not found"}
 		}
 		rebuildTools = toolNames(t, ts, token)
@@ -358,7 +359,7 @@ func TestRebuiltSessionOffersFilesOfNewSandbox(t *testing.T) {
 	handleMessage(svc, filePlain{reactingPlain: reactingPlain{ev: ev}, limit: 1 << 20}, "发我")
 	ev.waitFor(t, 3)
 	time.Sleep(50 * time.Millisecond)
-	if hasTool(resumeTools, "send_file") || !hasTool(rebuildTools, "send_file") {
+	if !hasTool(resumeTools, "send_file") || !hasTool(rebuildTools, "send_file") {
 		t.Fatalf("resume tools %v, rebuild tools %v", resumeTools, rebuildTools)
 	}
 	if got, want := joined(ev.snapshot()), "receipt|send:"+rebuiltNotice+"\n\n好了|file:a.txt||5|hello|5"; got != want {
