@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-const promptBase = "You are Grok replying in a private chat. Reply in the user's language with plain text. You may list and call MCP tools."
+const promptBase = "You are Grok replying in a private chat. Reply in the user's language using Markdown where helpful (use single backticks for inline file or directory names and fenced code blocks for multi-line blocks). You may list and call MCP tools."
 
 const promptWeb = " You may search the web and open web pages."
 

@@ -29,4 +29,13 @@ func TestSplit(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("%d parts", len(got))
 	}
+
+	fenced := "```\nline1\nline2\nline3\n```"
+	got = Split(fenced, 20)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 fenced parts, got %#v", got)
+	}
+	if got[0] != "```\nline1\nline2\n```" || got[1] != "```\nline3\n```" {
+		t.Fatalf("unexpected fenced parts: %#v", got)
+	}
 }
