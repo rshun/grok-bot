@@ -133,6 +133,22 @@ func (b *Bot) registerCommands() error {
 				},
 			},
 		},
+		{
+			Name:        "shell",
+			Description: "查看或开关服务器命令执行权限",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "mode",
+					Description: "开启或关闭命令执行",
+					Required:    false,
+					Choices: []*discordgo.ApplicationCommandOptionChoice{
+						{Name: "开启", Value: "on"},
+						{Name: "关闭", Value: "off"},
+					},
+				},
+			},
+		},
 	})
 	return err
 }
@@ -292,6 +308,15 @@ func commandText(data discordgo.ApplicationCommandInteractionData) string {
 			}
 		}
 		return "/model"
+	case "shell":
+		for _, opt := range data.Options {
+			if opt.Name == "mode" {
+				if mode := strings.TrimSpace(opt.StringValue()); mode != "" {
+					return "/shell " + mode
+				}
+			}
+		}
+		return "/shell"
 	case "dir", "task":
 		return subcommandText(data)
 	default:
@@ -350,11 +375,15 @@ func messageInbound(m *discordgo.MessageCreate, selfID string) (platform.Inbound
 		return platform.Inbound{}, false
 	}
 	text := strings.TrimSpace(m.Content)
-	images, skipped := attachmentImages(m.Attachments)
+	images, files, skipped := splitAttachments(m.Attachments)
 	other := len(m.StickerItems) > 0 || m.Poll != nil || m.Flags&discordgo.MessageFlagsIsVoiceMessage != 0
 	media := len(m.Attachments) > 0 || other
 	if text == "" && !media {
 		return platform.Inbound{}, false
+	}
+	var replyText string
+	if m.ReferencedMessage != nil {
+		replyText = strings.TrimSpace(m.ReferencedMessage.Content)
 	}
 	return platform.Inbound{
 		Platform:    platform.Discord,
@@ -362,8 +391,10 @@ func messageInbound(m *discordgo.MessageCreate, selfID string) (platform.Inbound
 		MessageID:   m.ID,
 		UserID:      m.Author.ID,
 		Text:        text,
-		TextMessage: len(images) > 0 || (text != "" && !media),
+		ReplyToText: replyText,
+		TextMessage: len(images) > 0 || len(files) > 0 || (text != "" && !media),
 		Images:      images,
+		Files:       files,
 		Skipped:     skipped || other,
 	}, true
 }

@@ -23,7 +23,7 @@ const (
 )
 
 // progressKeys are the tool input fields that carry something worth showing, in priority order.
-var progressKeys = []string{"query", "url", "target_file", "path", "target_directory", "file_path", "tool_name"}
+var progressKeys = []string{"command", "query", "url", "target_file", "path", "target_directory", "file_path", "tool_name"}
 
 // progressText turns a tool call into one short status line.
 func progressText(t grok.ToolUse) string {
@@ -37,6 +37,8 @@ func progressText(t grok.ToolUse) string {
 		label = "正在读取"
 	case "write", "search_replace":
 		label = "正在写入"
+	case "run_terminal_cmd", "run_terminal_command":
+		label = "正在执行命令"
 	case "use_tool":
 		label = "正在调用工具"
 	case "search_tool":

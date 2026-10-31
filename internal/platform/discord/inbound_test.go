@@ -39,12 +39,13 @@ func TestMessageInbound(t *testing.T) {
 	}
 
 	in, ok = messageInbound(&discordgo.MessageCreate{Message: &discordgo.Message{
-		ChannelID:   "c1",
-		Content:     "caption",
-		Author:      &discordgo.User{ID: "42"},
-		Attachments: []*discordgo.MessageAttachment{{ID: "a"}},
+		ChannelID:         "c1",
+		Content:           "caption",
+		Author:            &discordgo.User{ID: "42"},
+		Attachments:       []*discordgo.MessageAttachment{{ID: "a", Filename: "dates.txt"}},
+		ReferencedMessage: &discordgo.Message{Content: "quoted task output"},
 	}}, "bot")
-	if !ok || in.TextMessage {
+	if !ok || !in.TextMessage || len(in.Files) != 1 || in.Files[0].Name != "dates.txt" || in.ReplyToText != "quoted task output" {
 		t.Fatalf("ok=%v in=%#v", ok, in)
 	}
 	if _, ok := messageInbound(&discordgo.MessageCreate{Message: &discordgo.Message{

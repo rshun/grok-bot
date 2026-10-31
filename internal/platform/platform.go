@@ -20,15 +20,19 @@ type Inbound struct {
 	ChatID    string
 	MessageID string
 	UserID    string
-	// Text is the message text, or the caption when the message carries images.
+	// Text is the message text, or the caption when the message carries images or files.
 	Text string
-	// TextMessage is true when the message has text or images; it is false for voice notes and
-	// other payloads the bot cannot use.
+	// ReplyToText is the text of the message the user quoted when replying, if any.
+	ReplyToText string
+	// TextMessage is true when the message has text, images or files; it is false for voice notes
+	// and other payloads the bot cannot use.
 	TextMessage bool
 	// Images are the pictures of the message, at most MaxImages.
 	Images []Image
-	// Skipped is true when the message also carried attachments that are not images, or more
-	// images than MaxImages.
+	// Files are non-image document attachments of the message, at most MaxFiles.
+	Files []Attachment
+	// Skipped is true when the message also carried unsupported media, or more attachments than
+	// MaxImages / MaxFiles.
 	Skipped bool
 }
 
@@ -37,10 +41,17 @@ const (
 	MaxImages = 10
 	// MaxImageBytes is the largest single image the bot accepts.
 	MaxImageBytes = 10 << 20
+	// MaxFiles is the most document attachments taken from one message; the rest count as skipped.
+	MaxFiles = 5
+	// MaxFileBytes is the largest single uploaded document the bot accepts (20MB matches Telegram Bot API).
+	MaxFileBytes = 20 << 20
 )
 
 // ErrImageTooLarge is returned by an Image Load when the picture is over MaxImageBytes.
 var ErrImageTooLarge = errors.New("image too large")
+
+// ErrFileTooLarge is returned by an Attachment Load when the file is over MaxFileBytes.
+var ErrFileTooLarge = errors.New("file too large")
 
 // Image is a picture attached to a message. Nothing is downloaded until Load is called, and
 // the caller calls it only for messages from allowed users.
@@ -53,6 +64,13 @@ type Image struct {
 	Load func(ctx context.Context) ([]byte, error)
 }
 
+// Attachment is a non-image document attached to a message. Nothing is downloaded until Load is called.
+type Attachment struct {
+	MIME, Name string
+	Size       int64
+	Load       func(ctx context.Context) ([]byte, error)
+}
+
 // ReadImage reads a downloaded picture, stopping one byte after the limit.
 func ReadImage(r io.Reader) ([]byte, error) {
 	data, err := io.ReadAll(io.LimitReader(r, MaxImageBytes+1))
@@ -61,6 +79,18 @@ func ReadImage(r io.Reader) ([]byte, error) {
 	}
 	if len(data) > MaxImageBytes {
 		return nil, ErrImageTooLarge
+	}
+	return data, nil
+}
+
+// ReadAttachment reads a downloaded document, stopping one byte after MaxFileBytes.
+func ReadAttachment(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, MaxFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > MaxFileBytes {
+		return nil, ErrFileTooLarge
 	}
 	return data, nil
 }

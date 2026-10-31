@@ -417,3 +417,46 @@ func TestCrontabSyncAndRunTaskByID(t *testing.T) {
 		t.Fatalf("expected duplicate cron fire to be skipped, got %d messages", count)
 	}
 }
+
+func TestTaskRunNowAndUpdateSchedule(t *testing.T) {
+	ctx := context.Background()
+	svc, engine, _ := taskService(t, dailyNews)
+	origNext := time.Date(2026, 10, 19, 9, 0, 0, 0, taskZone)
+	id := addTask(t, svc, "9", dailyNews, "每天 09:00：看新闻", origNext)
+
+	setStructured := func(raw string) {
+		engine.mu.Lock()
+		defer engine.mu.Unlock()
+		engine.replyFor = func(opts grok.ReplyOptions) (grok.HeadlessResult, error) {
+			if opts.JSONSchema != "" {
+				return grok.HeadlessResult{SessionID: opts.SessionID, Structured: json.RawMessage(raw)}, nil
+			}
+			return grok.HeadlessResult{Text: "立即试跑结果", SessionID: opts.SessionID}, nil
+		}
+	}
+
+	// 1. Test-run immediately in natural language without changing NextRun
+	setStructured(`{"action":"run","task_id":` + strconv.FormatInt(id, 10) + `}`)
+	rec := &recorder{}
+	say(svc, rec, "现在试跑一下定时任务")
+	got := rec.wait(t, 1)
+	if !strings.Contains(got[0], "⏰ 定时任务 #1") || !strings.Contains(got[0], "立即试跑结果") {
+		t.Fatalf("run got %#v", got)
+	}
+	tasks, _ := svc.Store.Tasks(ctx, "telegram", "9")
+	if len(tasks) != 1 || !tasks[0].NextRun.Equal(origNext) {
+		t.Fatalf("test-run altered NextRun: %#v", tasks)
+	}
+
+	// 2. Update schedule time in natural language
+	setStructured(`{"action":"update","task_id":` + strconv.FormatInt(id, 10) + `,"kind":"daily","time":"10:30","summary":"每天 10:30：看新闻"}`)
+	say(svc, rec, "把定时任务改到每天 10:30")
+	got = rec.wait(t, 2)
+	if !strings.Contains(got[1], "已更新 #1：每天 10:30：看新闻") || !strings.Contains(got[1], "10-19 10:30") {
+		t.Fatalf("update got %#v", got)
+	}
+	tasks, _ = svc.Store.Tasks(ctx, "telegram", "9")
+	if !tasks[0].NextRun.Equal(time.Date(2026, 10, 19, 10, 30, 0, 0, taskZone)) || tasks[0].Prompt != "看新闻" {
+		t.Fatalf("updated task: %#v", tasks[0])
+	}
+}

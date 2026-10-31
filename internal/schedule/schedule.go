@@ -55,8 +55,8 @@ type ExistingTask struct {
 
 // Schema is passed to grok with --json-schema.
 const Schema = `{"type":"object","properties":{` +
-	`"action":{"type":"string","enum":["create","skip","pause","resume","delete"]},` +
-	`"task_id":{"type":"integer","description":"ID of the existing task when action is skip, pause, resume or delete"},` +
+	`"action":{"type":"string","enum":["create","skip","pause","resume","delete","run","update"]},` +
+	`"task_id":{"type":"integer","description":"ID of the existing task when action is skip, pause, resume, delete, run or update"},` +
 	`"kind":{"type":"string","enum":["once","daily","weekly","interval","dates"]},` +
 	`"at":{"type":"string","description":"once: local time YYYY-MM-DD HH:MM"},` +
 	`"time":{"type":"string","description":"daily, weekly or dates: local HH:MM"},` +
@@ -92,6 +92,8 @@ Turn the scheduling request below into JSON.
   - "prompt": what Grok should do each time the task runs, as an instruction in the user's language, without the schedule.
   - "summary": one short Chinese line such as "每天 09:00：总结科技新闻".
 - To manage an existing task in natural language:
+  - "action" = "run": immediately run/test an existing task once right now without changing its schedule (e.g. "现在试跑一下定时任务", "马上执行一次定时任务", "测试一下定时任务").
+  - "action" = "update": change an existing task's schedule/time (e.g. "把定时任务改到每天 10:00", "把检查日志任务改成每个工作日 09:30"); fill the new schedule fields ("kind", "at"/"time"/"weekdays"/"every_minutes"/"date_file") and set "summary" to reflect the new schedule ("prompt" may be omitted if unchanged).
   - "action" = "skip": cancel/skip only the next run (e.g. "取消明天的定时任务", "明天不用执行了", "跳过下次"), keeping future runs.
   - "action" = "pause": pause an active task until resumed (e.g. "暂停定时任务", "先停一下").
   - "action" = "resume": resume a paused task (e.g. "恢复定时任务", "继续执行").

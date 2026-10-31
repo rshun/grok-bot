@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,12 +14,12 @@ import (
 	"github.com/rshun/grok-bot/internal/platform"
 )
 
-// inbound turns a private message into the core's Inbound. A photo or an image document makes
-// the message usable even without text; other attachments are only noted through Skipped.
+// inbound turns a private message into the core's Inbound. Photos, image documents and general
+// file documents make the message usable even without text; voice/video/stickers are noted through Skipped.
 func (b *Bot) inbound(msg *tgbotapi.Message) platform.Inbound {
 	text := strings.TrimSpace(msg.Text)
-	images, skipped := b.images(msg)
-	if len(images) > 0 {
+	images, files, skipped := b.media(msg)
+	if len(images) > 0 || len(files) > 0 {
 		text = strings.TrimSpace(msg.Caption)
 	}
 	return platform.Inbound{
@@ -27,14 +28,26 @@ func (b *Bot) inbound(msg *tgbotapi.Message) platform.Inbound {
 		MessageID:   strconv.Itoa(msg.MessageID),
 		UserID:      strconv.FormatInt(msg.From.ID, 10),
 		Text:        text,
-		TextMessage: len(images) > 0 || (text != "" && !hasMedia(msg)),
+		ReplyToText: replyToText(msg.ReplyToMessage),
+		TextMessage: len(images) > 0 || len(files) > 0 || (text != "" && !hasMedia(msg)),
 		Images:      images,
+		Files:       files,
 		Skipped:     skipped,
 	}
 }
 
-// images returns the pictures of one message and whether anything else was left out.
-func (b *Bot) images(msg *tgbotapi.Message) (images []platform.Image, skipped bool) {
+func replyToText(reply *tgbotapi.Message) string {
+	if reply == nil {
+		return ""
+	}
+	if t := strings.TrimSpace(reply.Text); t != "" {
+		return t
+	}
+	return strings.TrimSpace(reply.Caption)
+}
+
+// media returns the pictures and document files of one message and whether anything else was left out.
+func (b *Bot) media(msg *tgbotapi.Message) (images []platform.Image, files []platform.Attachment, skipped bool) {
 	if len(msg.Photo) > 0 {
 		// Telegram lists the same photo in several sizes; only the largest is used.
 		best := msg.Photo[0]
@@ -56,7 +69,11 @@ func (b *Bot) images(msg *tgbotapi.Message) (images []platform.Image, skipped bo
 		if mime != "" {
 			images = append(images, b.image(doc.FileID, mime, doc.FileName, int64(doc.FileSize)))
 		} else {
-			skipped = true
+			name := strings.TrimSpace(doc.FileName)
+			if name == "" {
+				name = "attachment"
+			}
+			files = append(files, b.attachment(doc.FileID, strings.TrimSpace(doc.MimeType), name, int64(doc.FileSize)))
 		}
 	}
 	if msg.Voice != nil || msg.Audio != nil || msg.Video != nil || msg.Sticker != nil || msg.VideoNote != nil {
@@ -65,7 +82,10 @@ func (b *Bot) images(msg *tgbotapi.Message) (images []platform.Image, skipped bo
 	if len(images) > platform.MaxImages {
 		images, skipped = images[:platform.MaxImages], true
 	}
-	return images, skipped
+	if len(files) > platform.MaxFiles {
+		files, skipped = files[:platform.MaxFiles], true
+	}
+	return images, files, skipped
 }
 
 func hasMedia(msg *tgbotapi.Message) bool {
@@ -82,7 +102,16 @@ func (b *Bot) image(fileID, mime, name string, size int64) platform.Image {
 		MIME: mime,
 		Name: name,
 		Size: size,
-		Load: func(ctx context.Context) ([]byte, error) { return b.download(ctx, fileID) },
+		Load: func(ctx context.Context) ([]byte, error) { return b.download(ctx, fileID, platform.ReadImage) },
+	}
+}
+
+func (b *Bot) attachment(fileID, mime, name string, size int64) platform.Attachment {
+	return platform.Attachment{
+		MIME: mime,
+		Name: name,
+		Size: size,
+		Load: func(ctx context.Context) ([]byte, error) { return b.download(ctx, fileID, platform.ReadAttachment) },
 	}
 }
 
@@ -109,7 +138,7 @@ func (b *Bot) getFile(ctx context.Context, fileID string) (tgbotapi.File, error)
 
 // download fetches a file through getFile. The download URL holds the bot token, so no error
 // returned from here contains a URL: transport errors are replaced by fixed texts.
-func (b *Bot) download(ctx context.Context, fileID string) ([]byte, error) {
+func (b *Bot) download(ctx context.Context, fileID string, readBody func(io.Reader) ([]byte, error)) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -139,11 +168,11 @@ func (b *Bot) download(ctx context.Context, fileID string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("telegram download failed: status %d", resp.StatusCode)
 	}
-	data, err := platform.ReadImage(resp.Body)
+	data, err := readBody(resp.Body)
 	switch {
 	case ctx.Err() != nil:
 		return nil, ctx.Err()
-	case errors.Is(err, platform.ErrImageTooLarge):
+	case errors.Is(err, platform.ErrImageTooLarge), errors.Is(err, platform.ErrFileTooLarge):
 		return nil, err
 	case err != nil:
 		return nil, errors.New("telegram download failed")

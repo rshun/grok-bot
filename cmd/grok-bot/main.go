@@ -122,6 +122,8 @@ func main() {
 		QueueLimit:      cfg.QueueLimit,
 		Version:         cfg.Version,
 		WebSearch:       cfg.WebSearch,
+		AllowShell:      cfg.AllowShell,
+		UploadDir:       filepath.Join(dataDir, "uploads"),
 		Sandbox:         sandboxManager,
 		Senders:         map[string]platform.Replier{},
 		Location:        cfg.Location,

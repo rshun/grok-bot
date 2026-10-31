@@ -53,18 +53,19 @@ func TestInboundImageDocument(t *testing.T) {
 	}
 
 	in = b.inbound(privateMessage(tgbotapi.Message{
-		Caption:  "read this",
-		Document: &tgbotapi.Document{FileID: "d", FileName: "a.pdf", MimeType: "application/pdf"},
+		Caption:        "read this",
+		ReplyToMessage: &tgbotapi.Message{Text: "previous alert"},
+		Document:       &tgbotapi.Document{FileID: "d", FileName: "a.pdf", MimeType: "application/pdf"},
 	}))
-	if in.TextMessage || len(in.Images) != 0 {
-		t.Fatalf("pdf counted as usable: %#v", in)
+	if !in.TextMessage || len(in.Images) != 0 || len(in.Files) != 1 || in.Files[0].Name != "a.pdf" || in.ReplyToText != "previous alert" {
+		t.Fatalf("pdf document should be accepted as file attachment: %#v", in)
 	}
-	// Formats Grok cannot take are not images either.
+	// Formats Grok cannot take as vision images become file attachments instead.
 	in = b.inbound(privateMessage(tgbotapi.Message{
-		Document: &tgbotapi.Document{FileID: "d", MimeType: "image/svg+xml"},
+		Document: &tgbotapi.Document{FileID: "d", FileName: "icon.svg", MimeType: "image/svg+xml"},
 	}))
-	if in.TextMessage || len(in.Images) != 0 {
-		t.Fatalf("svg counted as image: %#v", in)
+	if !in.TextMessage || len(in.Images) != 0 || len(in.Files) != 1 || in.Files[0].Name != "icon.svg" {
+		t.Fatalf("svg should be file attachment: %#v", in)
 	}
 }
 
@@ -218,7 +219,7 @@ func TestInboundImageDocumentWithoutMIME(t *testing.T) {
 	in = b.inbound(privateMessage(tgbotapi.Message{
 		Document: &tgbotapi.Document{FileID: "d", FileName: "notes.txt"},
 	}))
-	if in.TextMessage || len(in.Images) != 0 || !in.Skipped {
+	if !in.TextMessage || len(in.Images) != 0 || len(in.Files) != 1 || in.Files[0].Name != "notes.txt" || in.Skipped {
 		t.Fatalf("%#v", in)
 	}
 }
