@@ -149,6 +149,30 @@ func (b *Bot) registerCommands() error {
 				},
 			},
 		},
+		{
+			Name:        "memory",
+			Description: "管理永久保留的长期记忆（/reset 后仍保留）",
+			Options: []*discordgo.ApplicationCommandOption{
+				{Type: discordgo.ApplicationCommandOptionSubCommand, Name: "list", Description: "查看长期记忆"},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "add",
+					Description: "添加一条长期记忆",
+					Options: []*discordgo.ApplicationCommandOption{
+						{Type: discordgo.ApplicationCommandOptionString, Name: "text", Description: "例如：每次应答前面都要加上xxx", Required: true},
+					},
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "del",
+					Description: "删除一条长期记忆",
+					Options: []*discordgo.ApplicationCommandOption{
+						{Type: discordgo.ApplicationCommandOptionInteger, Name: "id", Description: "记忆编号", Required: true},
+					},
+				},
+				{Type: discordgo.ApplicationCommandOptionSubCommand, Name: "clear", Description: "清空所有长期记忆"},
+			},
+		},
 	})
 	return err
 }
@@ -317,7 +341,7 @@ func commandText(data discordgo.ApplicationCommandInteractionData) string {
 			}
 		}
 		return "/shell"
-	case "dir", "task":
+	case "dir", "task", "memory":
 		return subcommandText(data)
 	default:
 		if data.Name == "" {
@@ -327,7 +351,7 @@ func commandText(data discordgo.ApplicationCommandInteractionData) string {
 	}
 }
 
-// subcommandText maps /dir and /task subcommands to the text commands the core understands.
+// subcommandText maps /dir, /task, and /memory subcommands to the text commands the core understands.
 func subcommandText(data discordgo.ApplicationCommandInteractionData) string {
 	base := "/" + data.Name
 	if len(data.Options) == 0 {
@@ -352,8 +376,12 @@ func subcommandText(data discordgo.ApplicationCommandInteractionData) string {
 		return base + " del " + values["id"]
 	case data.Name == "task" && sub.Name == "add":
 		return base + " " + values["text"]
-	case data.Name == "task" && sub.Name == "list":
+	case data.Name == "memory" && sub.Name == "add":
+		return base + " add " + values["text"]
+	case (data.Name == "task" || data.Name == "memory") && sub.Name == "list":
 		return base + " list"
+	case data.Name == "memory" && sub.Name == "clear":
+		return base + " clear"
 	default:
 		return base
 	}

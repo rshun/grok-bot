@@ -132,6 +132,8 @@ type ReplyOptions struct {
 	SendFile bool
 	// Images are sent together with Prompt; chat turns only.
 	Images []Image
+	// Memories are persistent user instructions injected into the system prompt on every turn.
+	Memories []string
 	// MaxTurns overrides Client.MaxTurns when non-zero (< 0 omits --max-turns).
 	MaxTurns int
 }
@@ -353,14 +355,39 @@ func systemPromptFor(opts ReplyOptions) string {
 	}
 	switch {
 	case opts.FileTools && opts.ShellTools:
-		return prompt + fmt.Sprintf(promptFilesAndShell, dirList(opts.WriteDirs))
+		prompt += fmt.Sprintf(promptFilesAndShell, dirList(opts.WriteDirs))
 	case opts.FileTools:
-		return prompt + fmt.Sprintf(promptFiles, dirList(opts.WriteDirs))
+		prompt += fmt.Sprintf(promptFiles, dirList(opts.WriteDirs))
 	case opts.ShellTools:
-		return prompt + promptShell
+		prompt += promptShell
 	default:
-		return prompt + promptEnd
+		prompt += promptEnd
 	}
+	if mem := formatMemoriesPrompt(opts.Memories); mem != "" {
+		prompt += mem
+	}
+	return prompt
+}
+
+func formatMemoriesPrompt(memories []string) string {
+	var items []string
+	for _, m := range memories {
+		m = strings.TrimSpace(m)
+		if m != "" {
+			items = append(items, m)
+		}
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\nLong-term user memories and standing instructions (strictly follow all of these in every reply across sessions):\n")
+	for _, m := range items {
+		b.WriteString("- ")
+		b.WriteString(m)
+		b.WriteByte('\n')
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func dirList(dirs []string) string {
@@ -447,6 +474,19 @@ func (c *Client) Models(ctx context.Context) (ModelList, error) {
 		return ModelList{}, fmt.Errorf("grok models returned no models")
 	}
 	return list, nil
+}
+
+// ResetLeader stops any running grok leader daemon so the next turn starts a fresh
+// daemon inheriting the bot's newly loaded environment (e.g. ~/.bash_profile MCP tokens).
+func (c *Client) ResetLeader(ctx context.Context) {
+	if c.Bin == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, c.Bin, "leader", "kill")
+	cmd.Env = envWithoutUpdate()
+	_ = cmd.Run()
 }
 
 type statusError struct {

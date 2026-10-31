@@ -30,6 +30,9 @@ func main() {
 	if os.Getenv("TELEGRAM_BOT_TOKEN") == "" && os.Getenv("DISCORD_BOT_TOKEN") == "" {
 		config.LoadEnvFile(os.Getenv("BOT_ENV_FILE"), "/etc/grok-tg-bot.env", ".env")
 	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		config.LoadUserProfile(home)
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("config", "err", err)
@@ -93,6 +96,9 @@ func main() {
 		Timeout:    cfg.GrokTimeout,
 		MaxTurns:   cfg.GrokMaxTurns,
 		InboxDir:   inbox,
+	}
+	if !isTaskRun {
+		engine.ResetLeader(context.Background())
 	}
 	// The local MCP server lets grok act on the chat during a turn. Chat keeps working without it.
 	// actionsForSvc stays nil when the server cannot listen or grok cannot be pointed at it.

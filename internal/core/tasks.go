@@ -608,6 +608,7 @@ func (s *Service) runTaskWithProgress(ctx context.Context, in platform.Inbound, 
 		Prompt:     t.Prompt,
 		WebSearch:  s.WebSearch,
 		OnTool:     onTool,
+		Memories:   s.chatMemories(ctx, t.Platform, t.ChatID),
 	}
 	_ = s.newSessionOptions(ctx, &opts)
 	turn, env, end := s.beginTurn(in, out, opts.FileTools || opts.ShellTools)

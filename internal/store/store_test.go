@@ -177,6 +177,56 @@ func TestTasksScopedAndDue(t *testing.T) {
 	}
 }
 
+func TestMemoriesSurviveClearSessionAndStayScoped(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	if err := s.SetSession(ctx, "telegram", "1", "sess-1"); err != nil {
+		t.Fatal(err)
+	}
+	id1, added, err := s.AddMemory(ctx, "telegram", "1", "每次应答前面都要加上xxx")
+	if err != nil || !added || id1 != 1 {
+		t.Fatalf("add 1: id=%d added=%v err=%v", id1, added, err)
+	}
+	// Duplicate content in same chat returns existing ID without duplicating.
+	dupID, dupAdded, err := s.AddMemory(ctx, "telegram", "1", "每次应答前面都要加上xxx")
+	if err != nil || dupAdded || dupID != id1 {
+		t.Fatalf("dup: id=%d added=%v err=%v", dupID, dupAdded, err)
+	}
+	// Different chat is isolated.
+	if _, _, err := s.AddMemory(ctx, "discord", "1", "discord专属"); err != nil {
+		t.Fatal(err)
+	}
+	// /reset (ClearSession) must NOT clear memories.
+	if err := s.ClearSession(ctx, "telegram", "1"); err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.Memories(ctx, "telegram", "1")
+	if err != nil || len(list) != 1 || list[0].Content != "每次应答前面都要加上xxx" {
+		t.Fatalf("after ClearSession: %#v %v", list, err)
+	}
+	// Cannot delete another chat's memory.
+	if _, ok, err := s.DeleteMemory(ctx, "discord", "1", id1); err != nil || ok {
+		t.Fatalf("cross-chat delete: %v %v", ok, err)
+	}
+	content, ok, err := s.DeleteMemory(ctx, "telegram", "1", id1)
+	if err != nil || !ok || content != "每次应答前面都要加上xxx" {
+		t.Fatalf("delete: %q %v %v", content, ok, err)
+	}
+	if _, _, err := s.AddMemory(ctx, "telegram", "1", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.AddMemory(ctx, "telegram", "1", "b"); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.ClearMemories(ctx, "telegram", "1")
+	if err != nil || n != 2 {
+		t.Fatalf("clear: %d %v", n, err)
+	}
+	if rem, _ := s.Memories(ctx, "discord", "1"); len(rem) != 1 {
+		t.Fatalf("discord memory touched: %#v", rem)
+	}
+}
+
 func openTest(t *testing.T) *Store {
 	t.Helper()
 	s, err := Open(filepath.Join(t.TempDir(), "data"), "grok-4.7")

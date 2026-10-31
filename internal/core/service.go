@@ -231,12 +231,33 @@ func (s *Service) answer(ctx context.Context, in platform.Inbound, out platform.
 	if fileFailure != "" {
 		return fileFailure, false, nil, nil
 	}
+	var memNote string
+	if len(in.Images) == 0 && len(uploaded) == 0 {
+		reply, followup, note, handled, err := s.tryNaturalMemory(ctx, in)
+		if handled || err != nil {
+			return reply, false, nil, err
+		}
+		if followup != "" {
+			in.Text = followup
+			memNote = note
+		}
+	} else if content, rest, ok := parseExplicitMemoryAdd(in.Text); ok {
+		r, err := s.memoryAdd(ctx, in, content)
+		if err != nil {
+			return "", false, nil, err
+		}
+		memNote = firstNoteLine(r)
+		in.Text = rest
+	}
 	if len(in.Images) == 0 {
 		taskIn := in
 		if len(uploaded) > 0 {
 			taskIn.Text = formatUploadedFilesPrompt(in.Text, uploaded, false)
 		}
 		if reply, taskFiles, handled, err := s.tryNaturalTask(ctx, taskIn, out, onTool); handled || err != nil {
+			if memNote != "" && reply != "" {
+				reply = memNote + "\n\n" + reply
+			}
 			return reply, false, taskFiles, err
 		}
 	}
@@ -244,7 +265,7 @@ func (s *Service) answer(ctx context.Context, in platform.Inbound, out platform.
 	if failure != "" {
 		return failure, false, nil, nil
 	}
-	return s.chat(ctx, in, out, images, uploaded, onTool)
+	return s.chat(ctx, in, out, images, uploaded, memNote, onTool)
 }
 
 func (s *Service) command(ctx context.Context, in platform.Inbound, out platform.Replier, cmd, arg string, onTool func(grok.ToolUse)) (string, []actions.File, error) {
@@ -270,11 +291,17 @@ func (s *Service) command(ctx context.Context, in platform.Inbound, out platform
 	case "/shell":
 		text, err := s.shellCommand(ctx, arg)
 		return text, nil, err
+	case "/memory":
+		text, err := s.memoryCommand(ctx, in, arg)
+		return text, nil, err
 	case "/task":
 		return s.taskCommand(ctx, in, out, arg, onTool)
 	case "/reset":
 		if err := s.Store.ClearSession(ctx, in.Platform, in.ChatID); err != nil {
 			return "", nil, err
+		}
+		if memories := s.chatMemories(ctx, in.Platform, in.ChatID); len(memories) > 0 {
+			return fmt.Sprintf("已清空这个聊天的上下文（%d 条长期记忆继续保留）。", len(memories)), nil, nil
 		}
 		return "已清空这个聊天的上下文。", nil, nil
 	default:
@@ -307,8 +334,11 @@ func (s *Service) modelCommand(ctx context.Context, in platform.Inbound, arg str
 // confirmations before the reply and the /reset reminder after it.
 // quiet is true when Grok reacted and had nothing to add: reply then holds only the
 // confirmations (a grant must always be confirmed), which may be empty.
-func (s *Service) chat(ctx context.Context, in platform.Inbound, out platform.Replier, images []grok.Image, uploaded []uploadedFile, onTool func(grok.ToolUse)) (reply string, quiet bool, files []actions.File, err error) {
+func (s *Service) chat(ctx context.Context, in platform.Inbound, out platform.Replier, images []grok.Image, uploaded []uploadedFile, memNote string, onTool func(grok.ToolUse)) (reply string, quiet bool, files []actions.File, err error) {
 	notes := s.applyGrants(ctx, in.Text)
+	if memNote != "" {
+		notes = append([]string{memNote}, notes...)
+	}
 	if in.Skipped {
 		notes = append([]string{skippedNote}, notes...)
 	}
@@ -376,8 +406,15 @@ func (s *Service) chatTurn(ctx context.Context, in platform.Inbound, out platfor
 	prompt = s.withChatTasksContext(ctx, in, prompt)
 	prompt = withReplyQuote(prompt, in.ReplyToText)
 
-	// The images stay in base so a rebuilt session gets them again.
-	base := grok.ReplyOptions{Model: chat.Model, Prompt: prompt, WebSearch: s.WebSearch, OnTool: onTool, Images: images}
+	// The images and long-term memories stay in base so new, resumed, and rebuilt sessions all receive them.
+	base := grok.ReplyOptions{
+		Model:     chat.Model,
+		Prompt:    prompt,
+		WebSearch: s.WebSearch,
+		OnTool:    onTool,
+		Images:    images,
+		Memories:  s.chatMemories(ctx, in.Platform, in.ChatID),
+	}
 	if chat.SessionID == "" {
 		return s.startSession(ctx, in, out, base)
 	}
@@ -526,6 +563,8 @@ func helpText(version string) string {
     查看或管理 Grok 可以读写的目录
 /shell
     查看或开关服务器命令执行权限（/shell on、/shell off）
+/memory
+    查看或管理长期记忆（也可直接说「长期记忆：内容」，执行 /reset 后仍会保留）
 /task 一句话
     创建或管理定时任务（平时直接用自然语言说明即可）
 /task list
@@ -535,7 +574,7 @@ func helpText(version string) string {
 /task del 编号
     删除定时任务
 /reset
-    清空这个聊天的上下文
+    清空这个聊天的上下文（长期记忆会保留）
 /help
     显示这条说明`
 	if version != "" && version != "dev" {
