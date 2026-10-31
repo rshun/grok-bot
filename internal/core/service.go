@@ -54,6 +54,8 @@ type Service struct {
 	TaskMinInterval time.Duration
 	// Crontab syncs scheduled tasks into the OS user crontab when non-nil.
 	Crontab *schedule.Crontab
+	// ShowProgress controls whether an editable "处理中…" status message is sent before the answer.
+	ShowProgress bool
 	// ProgressInterval is the shortest gap between edits of a progress message; 0 means 3 seconds.
 	ProgressInterval time.Duration
 	// ImageLoadTimeout bounds downloading the pictures of one message; 0 means 3 minutes.

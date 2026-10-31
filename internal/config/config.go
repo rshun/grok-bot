@@ -33,6 +33,7 @@ type Config struct {
 	QueueLimit    int
 	WebSearch     bool
 	AllowShell    bool
+	ShowProgress  bool
 	EnvFile       string
 	// Location is the time zone for scheduled tasks.
 	Location        *time.Location
@@ -111,6 +112,13 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("ALLOW_SHELL must be true or false")
 		}
 	}
+	showProgress := false
+	if raw := strings.TrimSpace(os.Getenv("SHOW_PROGRESS")); raw != "" {
+		showProgress, err = strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("SHOW_PROGRESS must be true or false")
+		}
+	}
 	envFile := strings.TrimSpace(os.Getenv("BOT_ENV_FILE"))
 	if envFile == "" {
 		envFile = "/etc/grok-tg-bot.env"
@@ -172,6 +180,7 @@ func Load() (Config, error) {
 		QueueLimit:      queueLimit,
 		WebSearch:       webSearch,
 		AllowShell:      allowShell,
+		ShowProgress:    showProgress,
 		EnvFile:         envFile,
 		Location:        location,
 		TaskLimit:       taskLimit,

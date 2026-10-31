@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -461,5 +463,77 @@ func TestEnvWithoutUpdateDropsBotConfig(t *testing.T) {
 	}
 	if count["GROK_BOT_TEST_PLAIN=kept"] != 1 {
 		t.Errorf("env dropped an unrelated variable")
+	}
+}
+
+func TestHelperRefreshAuth(t *testing.T) {
+	authPath := os.Getenv("GROK_BOT_TEST_REFRESH_AUTH")
+	if authPath == "" {
+		return
+	}
+	_ = os.WriteFile(authPath, []byte(`{"grok":{"key":"fresh-access-token-1234567890","refresh_token":"rt"}}`), 0o600)
+	os.Exit(0)
+}
+
+func TestAllowanceMultipleTokensAndRefreshOn401(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer fresh-access-token-1234567890" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Path == "/billing" {
+			_, _ = w.Write([]byte(`{"config":{"creditUsagePercent":10}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"subscriptionTier":"GrokPro"}`))
+	}))
+	defer srv.Close()
+
+	authFile := filepath.Join(t.TempDir(), "auth.json")
+	// 1. Multiple nested entries in auth.json (one stale, one valid): must deterministically succeed every single call.
+	multiJSON := `{
+		"alpha_stale": {"key": "stale-access-token-1234567890", "refresh_token": "rt1", "expires_at": 1000},
+		"zeta_other":  {"key": "other-stale-token-1234567890", "refresh_token": "rt2", "expires_at": 2000},
+		"grok.com":    {"key": "fresh-access-token-1234567890", "refresh_token": "rt3", "expires_at": 9999999999}
+	}`
+	if err := os.WriteFile(authFile, []byte(multiJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{
+		AuthPath:   authFile,
+		BillingURL: srv.URL + "/billing",
+		UserURL:    srv.URL + "/user",
+		HTTP:       srv.Client(),
+	}
+	for i := 0; i < 30; i++ {
+		got, err := client.Allowance(context.Background())
+		if err != nil || !got.HasUsedPercent || got.UsedPercent != 10 {
+			t.Fatalf("iter %d: got %+v, err %v", i, got, err)
+		}
+	}
+
+	// 2. Single expired token on disk: first HTTP call gets 401 -> triggers refreshAuth -> re-reads fresh token and succeeds on first Allowance() call.
+	if err := os.WriteFile(authFile, []byte(`{"grok":{"key":"expired-access-token-1234567890","refresh_token":"rt"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GROK_BOT_TEST_REFRESH_AUTH", authFile)
+	var fakeBin string
+	if runtime.GOOS == "windows" {
+		fakeBin = filepath.Join(t.TempDir(), "fake-grok.bat")
+		script := fmt.Sprintf("@echo off\r\n\"%s\" -test.run=^TestHelperRefreshAuth$\r\n", os.Args[0])
+		if err := os.WriteFile(fakeBin, []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		fakeBin = filepath.Join(t.TempDir(), "fake-grok")
+		script := fmt.Sprintf("#!/bin/sh\nexec \"%s\" -test.run='^TestHelperRefreshAuth$'\n", os.Args[0])
+		if err := os.WriteFile(fakeBin, []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	client.Bin = fakeBin
+	got, err := client.Allowance(context.Background())
+	if err != nil || !got.HasUsedPercent || got.UsedPercent != 10 {
+		t.Fatalf("after 401 auto-refresh: got %+v, err %v", got, err)
 	}
 }

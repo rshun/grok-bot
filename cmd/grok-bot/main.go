@@ -124,6 +124,7 @@ func main() {
 		Version:         cfg.Version,
 		WebSearch:       cfg.WebSearch,
 		AllowShell:      cfg.AllowShell,
+		ShowProgress:    cfg.ShowProgress,
 		UploadDir:       filepath.Join(dataDir, "uploads"),
 		Sandbox:         sandboxManager,
 		Senders:         map[string]platform.Replier{},
