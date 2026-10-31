@@ -10,6 +10,7 @@ import (
 
 	"github.com/rshun/grok-bot/internal/grok"
 	"github.com/rshun/grok-bot/internal/platform"
+	"github.com/rshun/grok-bot/internal/schedule"
 	"github.com/rshun/grok-bot/internal/store"
 )
 
@@ -375,5 +376,44 @@ func TestNaturalChatWithoutTaskCommand(t *testing.T) {
 	tasks, _ := svc.Store.Tasks(ctx, "telegram", "9")
 	if len(tasks) != 0 {
 		t.Fatalf("expected 0 tasks, got %#v", tasks)
+	}
+}
+
+func TestCrontabSyncAndRunTaskByID(t *testing.T) {
+	ctx := context.Background()
+	svc, _, sent := taskService(t, dailyNews)
+	var cronContent string
+	svc.Crontab = &schedule.Crontab{
+		CommandPrefix: "'/usr/local/bin/grok-bot'",
+		Read:          func() (string, error) { return cronContent, nil },
+		Write:         func(s string) error { cronContent = s; return nil },
+	}
+
+	rec := &recorder{}
+	say(svc, rec, "每天早上九点看新闻")
+	rec.wait(t, 1)
+	if !strings.Contains(cronContent, "0 9 * * * '/usr/local/bin/grok-bot' run-task 1") {
+		t.Fatalf("crontab not synced on create:\n%s", cronContent)
+	}
+
+	// Advance clock to 09:00 and run via RunTaskByID (simulating crond invocation)
+	svc.Now = func() time.Time { return time.Date(2026, 10, 19, 9, 0, 0, 0, taskZone) }
+	if err := svc.RunTaskByID(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	got := sent.wait(t, 1)
+	if !strings.Contains(got[0], "今天的新闻") {
+		t.Fatalf("RunTaskByID output: %#v", got)
+	}
+
+	// NextRun is now 2026-10-20 09:00; a duplicate RunTaskByID on 10-19 must be a no-op
+	if err := svc.RunTaskByID(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	sent.mu.Lock()
+	count := len(sent.msgs)
+	sent.mu.Unlock()
+	if count != 1 {
+		t.Fatalf("expected duplicate cron fire to be skipped, got %d messages", count)
 	}
 }

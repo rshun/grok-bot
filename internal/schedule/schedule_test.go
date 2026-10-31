@@ -179,3 +179,43 @@ func TestPromptContainsNowAndZone(t *testing.T) {
 		t.Fatal("Schema is not valid JSON")
 	}
 }
+
+func TestCronExprAndMergeCrontab(t *testing.T) {
+	entries := []CronEntry{
+		{
+			ID:      1,
+			Spec:    `{"kind":"dates","time":"09:30","date_file":"/srv/dates.txt"}`,
+			Summary: "按日期文件 09:30：检查日志",
+			NextRun: at(20, 9, 30, 0),
+		},
+		{
+			ID:      2,
+			Spec:    `{"kind":"weekly","time":"08:00","weekdays":[1,3,5]}`,
+			Summary: "每周一三五 08:00：看新闻",
+			NextRun: at(21, 8, 0, 0),
+			Paused:  true,
+		},
+	}
+	existing := "0 3 * * * /usr/bin/backup.sh\n# BEGIN GROK-BOT TASKS\nold line\n# END GROK-BOT TASKS\n"
+	merged := MergeCrontab(existing, entries, loc, "cd '/srv/bot' && '/usr/local/bin/grok-bot'")
+	for _, want := range []string{
+		"0 3 * * * /usr/bin/backup.sh",
+		"# BEGIN GROK-BOT TASKS",
+		"# #1 按日期文件 09:30：检查日志 (next: 2026-10-20 09:30, date_file: /srv/dates.txt)",
+		"30 9 * * * cd '/srv/bot' && '/usr/local/bin/grok-bot' run-task 1",
+		"# #2 [PAUSED] 每周一三五 08:00：看新闻",
+		"# 0 8 * * 1,3,5 cd '/srv/bot' && '/usr/local/bin/grok-bot' run-task 2",
+		"# END GROK-BOT TASKS",
+	} {
+		if !strings.Contains(merged, want) {
+			t.Fatalf("missing %q in:\n%s", want, merged)
+		}
+	}
+	if strings.Contains(merged, "old line") {
+		t.Fatalf("old block not replaced:\n%s", merged)
+	}
+	cleared := MergeCrontab(merged, nil, loc, "grok-bot")
+	if strings.TrimSpace(cleared) != "0 3 * * * /usr/bin/backup.sh" {
+		t.Fatalf("cleared got:\n%s", cleared)
+	}
+}
