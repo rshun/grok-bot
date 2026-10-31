@@ -91,6 +91,7 @@ func main() {
 		BillingURL: cfg.BillingURL,
 		UserURL:    cfg.UserURL,
 		Timeout:    cfg.GrokTimeout,
+		MaxTurns:   cfg.GrokMaxTurns,
 		InboxDir:   inbox,
 	}
 	// The local MCP server lets grok act on the chat during a turn. Chat keeps working without it.

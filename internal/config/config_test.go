@@ -121,12 +121,16 @@ func TestLoadTaskSettings(t *testing.T) {
 	if cfg, err = Load(); err != nil || cfg.Location.String() != "UTC" || cfg.TaskLimit != 5 || cfg.TaskMinInterval != 90*time.Minute {
 		t.Fatalf("%v %d %v %v", cfg.Location, cfg.TaskLimit, cfg.TaskMinInterval, err)
 	}
-	for env, value := range map[string]string{"TIMEZONE": "Nowhere/Zone", "TASK_LIMIT": "0", "TASK_MIN_INTERVAL": "0s"} {
+	for env, value := range map[string]string{"TIMEZONE": "Nowhere/Zone", "TASK_LIMIT": "0", "TASK_MIN_INTERVAL": "0s", "GROK_MAX_TURNS": "-1"} {
 		t.Run(env, func(t *testing.T) {
 			t.Setenv(env, value)
 			if _, err := Load(); err == nil {
 				t.Fatalf("%s=%s accepted", env, value)
 			}
 		})
+	}
+	t.Setenv("GROK_MAX_TURNS", "0")
+	if cfg, err = Load(); err != nil || cfg.GrokMaxTurns != -1 {
+		t.Fatalf("GROK_MAX_TURNS=0: %d %v", cfg.GrokMaxTurns, err)
 	}
 }

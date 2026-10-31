@@ -30,6 +30,7 @@ type streamLine struct {
 
 type streamBlock struct {
 	Type  string          `json:"type"`
+	Text  string          `json:"text"`
 	Name  string          `json:"name"`
 	Input json.RawMessage `json:"input"`
 }
@@ -39,9 +40,10 @@ type streamBlock struct {
 // onTool may be nil. A line longer than maxStreamLine is skipped, not fatal.
 func ParseStream(r io.Reader, onTool func(ToolUse)) (HeadlessResult, error) {
 	reader := bufio.NewReaderSize(r, 64<<10)
+	var lastText string
 	for {
 		raw, readErr := readStreamLine(reader)
-		if result, done, err := parseStreamLine(strings.TrimSpace(string(raw)), onTool); done {
+		if result, done, err := parseStreamLine(strings.TrimSpace(string(raw)), onTool, &lastText); done {
 			return result, err
 		}
 		if readErr == io.EOF {
@@ -79,7 +81,7 @@ func readStreamLine(r *bufio.Reader) ([]byte, error) {
 }
 
 // parseStreamLine handles one stream line. done is true when the line ends the turn.
-func parseStreamLine(line string, onTool func(ToolUse)) (result HeadlessResult, done bool, err error) {
+func parseStreamLine(line string, onTool func(ToolUse), lastText *string) (result HeadlessResult, done bool, err error) {
 	if line == "" || line[0] != '{' {
 		return HeadlessResult{}, false, nil
 	}
@@ -89,8 +91,8 @@ func parseStreamLine(line string, onTool func(ToolUse)) (result HeadlessResult, 
 	}
 	switch msg.Type {
 	case "assistant":
-		if onTool != nil {
-			reportToolUses(msg.Message, onTool)
+		if text := reportAssistantBlocks(msg.Message, onTool); text != "" && lastText != nil {
+			*lastText = text
 		}
 	case "error":
 		var detail string
@@ -101,7 +103,18 @@ func parseStreamLine(line string, onTool func(ToolUse)) (result HeadlessResult, 
 		return HeadlessResult{}, true, &RunError{Message: detail}
 	case "result":
 		if msg.IsError || msg.Subtype != "success" {
-			return HeadlessResult{}, true, &RunError{Message: resultFailure(msg)}
+			runErr := &RunError{
+				Message:   resultFailure(msg),
+				SessionID: msg.SessionID,
+			}
+			if msg.Subtype == "error_max_turns" || IsMaxTurns(runErr) {
+				if trimmed := strings.TrimSpace(msg.Result); trimmed != "" {
+					runErr.PartialText = trimmed
+				} else if lastText != nil && *lastText != "" {
+					runErr.PartialText = *lastText
+				}
+			}
+			return HeadlessResult{SessionID: msg.SessionID}, true, runErr
 		}
 		return HeadlessResult{
 			Text:      strings.TrimSpace(msg.Result),
@@ -111,19 +124,26 @@ func parseStreamLine(line string, onTool func(ToolUse)) (result HeadlessResult, 
 	return HeadlessResult{}, false, nil
 }
 
-func reportToolUses(raw json.RawMessage, onTool func(ToolUse)) {
+func reportAssistantBlocks(raw json.RawMessage, onTool func(ToolUse)) string {
 	var message struct {
 		Content []streamBlock `json:"content"`
 	}
 	if json.Unmarshal(raw, &message) != nil {
-		return
+		return ""
 	}
+	var texts []string
 	for _, block := range message.Content {
+		if block.Type == "text" {
+			if t := strings.TrimSpace(block.Text); t != "" {
+				texts = append(texts, t)
+			}
+		}
 		// Web search arrives as server_tool_use; local and MCP tools as tool_use.
-		if block.Type == "tool_use" || block.Type == "server_tool_use" {
+		if onTool != nil && (block.Type == "tool_use" || block.Type == "server_tool_use") {
 			onTool(ToolUse{Name: block.Name, Input: block.Input})
 		}
 	}
+	return strings.Join(texts, "\n\n")
 }
 
 func resultFailure(msg streamLine) string {

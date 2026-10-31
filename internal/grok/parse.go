@@ -3,6 +3,7 @@ package grok
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -318,11 +319,24 @@ func ParseHeadless(output string) (HeadlessResult, error) {
 
 // RunError is a failure reported by grok itself.
 type RunError struct {
-	Message string
+	Message     string
+	SessionID   string
+	PartialText string
 }
 
 func (e *RunError) Error() string {
 	return e.Message
+}
+
+// IsMaxTurns reports whether err indicates grok hit its --max-turns limit.
+func IsMaxTurns(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "maximum number of turns") ||
+		strings.Contains(lower, "max turns") ||
+		strings.Contains(lower, "error_max_turns")
 }
 
 func extractJSON(output string) []byte {
@@ -381,6 +395,12 @@ func UserFacing(err error) string {
 		strings.Contains(lower, "authentication"),
 		strings.Contains(lower, "auth"):
 		return "grok 未登录或登录已过期。在运行 bot 的这个用户下执行 grok login 后再试。"
+	case IsMaxTurns(err):
+		var runErr *RunError
+		if errors.As(err, &runErr) && strings.TrimSpace(runErr.PartialText) != "" {
+			return strings.TrimSpace(runErr.PartialText) + "\n\n（本轮工具调用次数已达上限，当前进度已保存在会话中，直接回复「继续」即可接着往下执行。）"
+		}
+		return "本轮工具调用次数已达上限，当前进度已保存在会话中，直接回复「继续」即可接着往下执行。"
 	case strings.Contains(lower, "deadline") || strings.Contains(lower, "timeout") || strings.Contains(lower, "context canceled"):
 		return "处理超时。请再发一次。"
 	default:
