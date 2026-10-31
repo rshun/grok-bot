@@ -144,8 +144,19 @@ func TestReactOnlyWithoutProgressSendsNothing(t *testing.T) {
 	out := reactingPlain{ev: ev}
 	handleMessage(svc, out, "谢谢")
 	ev.waitFor(t, 2)
-	// The lane is serial: once the next answer arrives, the first turn has finished.
+	ln := svc.lane(platform.Telegram, "9")
+	for {
+		ln.mu.Lock()
+		d := ln.depth
+		ln.mu.Unlock()
+		if d == 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	engine.mu.Lock()
 	engine.replyFor = nil
+	engine.mu.Unlock()
 	handleMessage(svc, out, "再来")
 	ev.waitFor(t, 4)
 	time.Sleep(50 * time.Millisecond)

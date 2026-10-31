@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -27,6 +28,8 @@ const taskUsage = `用法：
     删除定时任务`
 
 const notUnderstood = "没看懂时间，请换个说法。"
+
+var errNotTask = errors.New("not a task request")
 
 // missedGrace separates a run the scheduler is about to pick up from one missed while the bot was down.
 const missedGrace = time.Minute
@@ -59,7 +62,7 @@ func (s *Service) minInterval() time.Duration {
 	return s.TaskMinInterval
 }
 
-func (s *Service) taskCommand(ctx context.Context, in platform.Inbound, out platform.Replier, arg string) (string, []actions.File, error) {
+func (s *Service) taskCommand(ctx context.Context, in platform.Inbound, out platform.Replier, arg string, onTool func(grok.ToolUse)) (string, []actions.File, error) {
 	fields := strings.Fields(arg)
 	switch {
 	case len(fields) == 0:
@@ -70,17 +73,17 @@ func (s *Service) taskCommand(ctx context.Context, in platform.Inbound, out plat
 	case fields[0] == "run" && len(fields) == 2:
 		id, err := strconv.ParseInt(strings.TrimPrefix(fields[1], "#"), 10, 64)
 		if err != nil {
-			return s.taskCreate(ctx, in, out, arg)
+			return s.taskCreateWithProgress(ctx, in, out, arg, onTool)
 		}
 		existing, err := s.Store.Tasks(ctx, in.Platform, in.ChatID)
 		if err != nil {
 			return "", nil, err
 		}
-		return s.taskManage(ctx, in, out, existing, schedule.Parsed{Action: "run", TaskID: id}, s.now())
+		return s.taskManage(ctx, in, out, existing, schedule.Parsed{Action: "run", TaskID: id}, s.now(), onTool)
 	case fields[0] == "del" && len(fields) == 2:
 		id, err := strconv.ParseInt(strings.TrimPrefix(fields[1], "#"), 10, 64)
 		if err != nil {
-			return s.taskCreate(ctx, in, out, arg)
+			return s.taskCreateWithProgress(ctx, in, out, arg, onTool)
 		}
 		removed, err := s.Store.DeleteTask(ctx, in.Platform, in.ChatID, id)
 		if err != nil {
@@ -94,7 +97,11 @@ func (s *Service) taskCommand(ctx context.Context, in platform.Inbound, out plat
 	case fields[0] == "del" && len(fields) == 1:
 		return taskUsage, nil, nil
 	default:
-		return s.taskCreate(ctx, in, out, arg)
+		reply, files, err := s.taskCreateWithProgress(ctx, in, out, arg, onTool)
+		if errors.Is(err, errNotTask) {
+			return notUnderstood, nil, nil
+		}
+		return reply, files, err
 	}
 }
 
@@ -118,7 +125,7 @@ func (s *Service) taskList(ctx context.Context, in platform.Inbound) (string, er
 	return strings.TrimSpace(b.String()), nil
 }
 
-func (s *Service) taskCreate(ctx context.Context, in platform.Inbound, out platform.Replier, text string) (string, []actions.File, error) {
+func (s *Service) taskCreateWithProgress(ctx context.Context, in platform.Inbound, out platform.Replier, text string, onTool func(grok.ToolUse)) (string, []actions.File, error) {
 	existing, err := s.Store.Tasks(ctx, in.Platform, in.ChatID)
 	if err != nil {
 		return "", nil, err
@@ -161,12 +168,15 @@ func (s *Service) taskCreate(ctx context.Context, in platform.Inbound, out platf
 		slog.Warn("schedule decode failed", "err", err)
 		return notUnderstood, nil, nil
 	}
+	if parsed.Action == "none" {
+		return "", nil, errNotTask
+	}
 	if parsed.Error != "" {
 		return notUnderstood + "（" + parsed.Error + "）", nil, nil
 	}
 	switch parsed.Action {
 	case "skip", "pause", "resume", "delete", "run", "update":
-		return s.taskManage(ctx, in, out, existing, parsed, now)
+		return s.taskManage(ctx, in, out, existing, parsed, now, onTool)
 	}
 	if len(existing) >= s.taskLimit() {
 		return fmt.Sprintf("这个聊天最多 %d 个定时任务，先用 /task del 删掉一些。", s.taskLimit()), nil, nil
@@ -205,7 +215,7 @@ func (s *Service) taskCreate(ctx context.Context, in platform.Inbound, out platf
 	return fmt.Sprintf("已创建 #%d：%s。下次执行：%s。", id, summary, next.In(s.location()).Format("01-02 15:04")), nil, nil
 }
 
-func (s *Service) taskManage(ctx context.Context, in platform.Inbound, out platform.Replier, existing []store.Task, parsed schedule.Parsed, now time.Time) (string, []actions.File, error) {
+func (s *Service) taskManage(ctx context.Context, in platform.Inbound, out platform.Replier, existing []store.Task, parsed schedule.Parsed, now time.Time, onTool func(grok.ToolUse)) (string, []actions.File, error) {
 	if len(existing) == 0 {
 		return "这个聊天没有定时任务。", nil, nil
 	}
@@ -221,6 +231,9 @@ func (s *Service) taskManage(ctx context.Context, in platform.Inbound, out platf
 		}
 	}
 	if target == nil {
+		if targetID > 0 {
+			return fmt.Sprintf("没有 #%d 这个定时任务，可发 /task list 查看。", targetID), nil, nil
+		}
 		return "请说明要操作哪个定时任务，或先发 /task list 查看。", nil, nil
 	}
 	switch parsed.Action {
@@ -229,10 +242,11 @@ func (s *Service) taskManage(ctx context.Context, in platform.Inbound, out platf
 			Platform:    target.Platform,
 			ChatID:      target.ChatID,
 			UserID:      target.UserID,
+			MessageID:   in.MessageID,
 			Text:        target.Prompt,
 			TextMessage: true,
 		}
-		reply, files := s.runTask(ctx, runIn, out, *target)
+		reply, files := s.runTaskWithProgress(ctx, runIn, out, *target, onTool)
 		return reply, files, nil
 	case "update":
 		if err := parsed.Validate(now, s.location(), s.minInterval()); err != nil {
@@ -311,7 +325,11 @@ func looksLikeTaskManage(text string) bool {
 	lower := strings.ToLower(text)
 	for _, kw := range []string{
 		"暂停", "恢复", "继续", "跳过", "取消", "删", "停", "不执行", "不用",
-		"试跑", "马上执行", "立即执行", "测试", "改到", "改成", "改为", "修改", "调整",
+		"试跑", "试运行", "测试运行",
+		"马上执行", "立即执行", "立刻执行", "现在执行",
+		"马上运行", "立即运行", "立刻运行", "现在运行",
+		"执行", "运行", "跑一下", "跑一次", "测试",
+		"改到", "改成", "改为", "修改", "调整", "推迟", "提前",
 		"pause", "resume", "skip", "cancel", "del", "run",
 	} {
 		if strings.Contains(lower, kw) {
@@ -323,23 +341,26 @@ func looksLikeTaskManage(text string) bool {
 
 // tryNaturalTask handles natural-language task creation, listing, running, updating,
 // skipping, pausing, resuming and deletion in ordinary chat without requiring /task.
-func (s *Service) tryNaturalTask(ctx context.Context, in platform.Inbound, out platform.Replier) (string, []actions.File, bool, error) {
+func (s *Service) tryNaturalTask(ctx context.Context, in platform.Inbound, out platform.Replier, onTool func(grok.ToolUse)) (string, []actions.File, bool, error) {
 	text := strings.TrimSpace(in.Text)
 	if text == "" {
 		return "", nil, false, nil
-	}
-	if looksLikeTaskList(text) {
-		reply, err := s.taskList(ctx, in)
-		return reply, nil, true, err
 	}
 	existing, err := s.Store.Tasks(ctx, in.Platform, in.ChatID)
 	if err != nil {
 		return "", nil, false, err
 	}
-	if !looksLikeNaturalTask(text, len(existing) > 0) {
+	if looksLikeTaskList(text, len(existing) > 0) {
+		reply, err := s.taskList(ctx, in)
+		return reply, nil, true, err
+	}
+	if !looksLikeNaturalTask(text, existing) {
 		return "", nil, false, nil
 	}
-	reply, files, err := s.taskCreate(ctx, in, out, text)
+	reply, files, err := s.taskCreateWithProgress(ctx, in, out, text, onTool)
+	if errors.Is(err, errNotTask) {
+		return "", nil, false, nil
+	}
 	if err != nil {
 		return "", nil, false, err
 	}
@@ -353,22 +374,40 @@ func mentionsTaskExplicitly(text string) bool {
 	return strings.Contains(text, "定时任务") || strings.Contains(text, "周期任务")
 }
 
-func looksLikeTaskList(text string) bool {
-	if !mentionsTaskExplicitly(text) {
-		return false
+func mentionsTaskRef(text string, existing []store.Task) bool {
+	if strings.Contains(text, "任务") {
+		return true
 	}
-	if looksLikeTaskManage(text) {
-		return false
-	}
-	for _, kw := range []string{"查看", "看看", "看下", "看一下", "有哪些", "有什么", "列表", "list"} {
-		if strings.Contains( strings.ToLower(text), kw) {
+	for _, t := range existing {
+		if strings.Contains(text, fmt.Sprintf("#%d", t.ID)) {
 			return true
 		}
 	}
 	return false
 }
 
-func looksLikeNaturalTask(text string, hasExisting bool) bool {
+func looksLikeTaskList(text string, hasExisting bool) bool {
+	if looksLikeTaskManage(text) {
+		return false
+	}
+	if mentionsTaskExplicitly(text) {
+		for _, kw := range []string{"查看", "看看", "看下", "看一下", "有哪些", "有什么", "列表", "list"} {
+			if strings.Contains(strings.ToLower(text), kw) {
+				return true
+			}
+		}
+	}
+	if hasExisting {
+		for _, kw := range []string{"任务列表", "查看任务", "看看任务", "看下任务", "看一下任务", "有哪些任务", "有什么任务"} {
+			if strings.Contains(text, kw) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func looksLikeNaturalTask(text string, existing []store.Task) bool {
 	if mentionsTaskExplicitly(text) {
 		return true
 	}
@@ -380,14 +419,20 @@ func looksLikeNaturalTask(text string, hasExisting bool) bool {
 	if (strings.Contains(text, "按照") || strings.Contains(text, "根据")) && strings.Contains(text, "日期") {
 		return true
 	}
-	if hasExisting {
+	if len(existing) > 0 {
 		for _, kw := range []string{
 			"取消明天", "明天不", "跳过下次", "跳过明天", "暂停", "恢复", "删除任务", "取消任务",
-			"试跑", "马上执行", "立即执行", "改到", "改成", "改为",
+			"试跑", "试运行", "测试运行",
+			"马上执行", "立即执行", "立刻执行", "现在执行",
+			"马上运行", "立即运行", "立刻运行", "现在运行",
+			"改到", "改成", "改为",
 		} {
 			if strings.Contains(text, kw) {
 				return true
 			}
+		}
+		if mentionsTaskRef(text, existing) && looksLikeTaskManage(text) {
+			return true
 		}
 	}
 	return false
@@ -543,6 +588,10 @@ func (s *Service) runDue(ctx context.Context) {
 // runTask answers a task in a fresh session that is never saved as the chat's session.
 // It returns the message to send and the files the run queued.
 func (s *Service) runTask(ctx context.Context, in platform.Inbound, out platform.Replier, t store.Task) (string, []actions.File) {
+	return s.runTaskWithProgress(ctx, in, out, t, nil)
+}
+
+func (s *Service) runTaskWithProgress(ctx context.Context, in platform.Inbound, out platform.Replier, t store.Task, onTool func(grok.ToolUse)) (string, []actions.File) {
 	header := taskHeader(t)
 	chat, err := s.Store.Chat(ctx, t.Platform, t.ChatID)
 	if err != nil {
@@ -558,6 +607,7 @@ func (s *Service) runTask(ctx context.Context, in platform.Inbound, out platform
 		Model:      chat.Model,
 		Prompt:     t.Prompt,
 		WebSearch:  s.WebSearch,
+		OnTool:     onTool,
 	}
 	_ = s.newSessionOptions(ctx, &opts)
 	turn, env, end := s.beginTurn(in, out, opts.FileTools || opts.ShellTools)

@@ -459,4 +459,30 @@ func TestTaskRunNowAndUpdateSchedule(t *testing.T) {
 	if !tasks[0].NextRun.Equal(time.Date(2026, 10, 19, 10, 30, 0, 0, taskZone)) || tasks[0].Prompt != "看新闻" {
 		t.Fatalf("updated task: %#v", tasks[0])
 	}
+
+	// 3. Natural phrasing "请试运行一下任务2" (without "定时") triggers task #2 directly
+	id2 := addTask(t, svc, "9", dailyNews, "每周一至周五 07:30：随机抽取10个单词", origNext)
+	setStructured(`{"action":"run","task_id":` + strconv.FormatInt(id2, 10) + `}`)
+	say(svc, rec, "请试运行一下任务2")
+	got = rec.wait(t, 3)
+	if !strings.Contains(got[2], "⏰ 定时任务 #2") || !strings.Contains(got[2], "随机抽取10个单词") {
+		t.Fatalf("natural run task2 got %#v", got)
+	}
+
+	// 4. Conversational question about tasks falls back via action="none" and injects task list context into chat
+	var chatPrompt string
+	engine.mu.Lock()
+	engine.replyFor = func(opts grok.ReplyOptions) (grok.HeadlessResult, error) {
+		if opts.JSONSchema != "" {
+			return grok.HeadlessResult{SessionID: opts.SessionID, Structured: json.RawMessage(`{"action":"none"}`)}, nil
+		}
+		chatPrompt = opts.Prompt
+		return grok.HeadlessResult{Text: "普通对话回复", SessionID: opts.SessionID}, nil
+	}
+	engine.mu.Unlock()
+	say(svc, rec, "帮我看看任务2每次具体执行什么提示词？")
+	got = rec.wait(t, 4)
+	if got[3] != "普通对话回复" || !strings.Contains(chatPrompt, "[当前聊天的定时任务列表]") || !strings.Contains(chatPrompt, "#2 每周一至周五 07:30：随机抽取10个单词") {
+		t.Fatalf("chat fallback got %q, prompt=%q", got[3], chatPrompt)
+	}
 }
