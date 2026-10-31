@@ -56,7 +56,7 @@ go test -mod=readonly ./...
 - 可写名单所有聊天共用。不能授权写入 `/`、`/etc`、`/proc`、`/sys`、`/dev`、`/boot`、`/root`、`~/.grok`、`~/.ssh`、`DATA_DIR`，以及这些位置的上下级目录和包含 `BOT_ENV_FILE` 的目录；软链接按真实路径检查。
 - `/dir` 查看可写目录；`/dir add rw`、`/dir del` 是命令形式的兜底。
 - bot 会生成服务用户的 `~/.grok/sandbox.toml`（第一行是 `# managed by grok-bot; do not edit`）。如果这个文件已经存在且不是 bot 生成的，bot 不会覆盖它，文件功能保持关闭，`/dir` 会提示管理员手动合并 `grokbot` 配置。
-- 服务器没有安装 bubblewrap（`bwrap`）时，沙箱会自动省略读取黑名单，文件读写与聊天、联网搜索、定时任务照常可用（写入仍受 Landlock 限制，发文件仍由 bot 检查黑名单）；装上 `sudo apt install -y bubblewrap` 后下一条消息自动启用沙箱读取黑名单，不用重启服务。
+- 服务器没有安装 bubblewrap（`bwrap`）时，Linux 上的 grok 无法启动自定义沙箱（因 grok 内置的运行时 socket 黑名单依赖 `bwrap`），此时 bot 会自动省略 `--sandbox`，文件读写与聊天、联网搜索、定时任务照常可用（写入目录由系统提示词约束，发文件仍由 bot 检查黑名单）；装上 `sudo apt install -y bubblewrap` 后新会话自动启用内核沙箱，不用重启服务。
 - 已有会话无需发送 `/reset` 即可直接使用文件读写功能。
 - **已知风险（已接受）**：Grok 能读服务用户能读的一切，同时又能打开网页。恶意网页可能诱导 Grok 读取本机文件并通过网址发出去。请用专门的系统用户运行服务，不要让它能读到不该给 Grok 看的文件。
 - bot 不再把自己的 token 和配置（`TELEGRAM_BOT_TOKEN`、`DISCORD_BOT_TOKEN`、允许名单、`DATA_DIR`、`BOT_ENV_FILE` 等）传给 grok，Grok 读 `/proc/self/environ` 也拿不到 bot token。`GROK_*` 开头的设置和 `HOME`、`PATH`、语言、代理等通用变量照常传下去。
