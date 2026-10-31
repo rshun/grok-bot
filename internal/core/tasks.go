@@ -19,6 +19,8 @@ import (
 const taskUsage = `用法：
 /task 每天早上九点总结科技新闻
     用一句话创建定时任务
+/task 取消明天的定时任务 / 暂停定时任务 / 恢复定时任务
+    用自然语言跳过下次、暂停、恢复或删除定时任务
 /task list
     查看这个聊天的定时任务
 /task del 编号
@@ -64,13 +66,10 @@ func (s *Service) taskCommand(ctx context.Context, in platform.Inbound, arg stri
 		return taskUsage, nil
 	case len(fields) == 1 && fields[0] == "list":
 		return s.taskList(ctx, in)
-	case fields[0] == "del":
-		if len(fields) != 2 {
-			return taskUsage, nil
-		}
+	case fields[0] == "del" && len(fields) == 2:
 		id, err := strconv.ParseInt(strings.TrimPrefix(fields[1], "#"), 10, 64)
 		if err != nil {
-			return taskUsage, nil
+			return s.taskCreate(ctx, in, arg)
 		}
 		removed, err := s.Store.DeleteTask(ctx, in.Platform, in.ChatID, id)
 		if err != nil {
@@ -80,6 +79,8 @@ func (s *Service) taskCommand(ctx context.Context, in platform.Inbound, arg stri
 			return "没有这个任务。", nil
 		}
 		return fmt.Sprintf("已删除 #%d。", id), nil
+	case fields[0] == "del" && len(fields) == 1:
+		return taskUsage, nil
 	default:
 		return s.taskCreate(ctx, in, arg)
 	}
@@ -96,6 +97,10 @@ func (s *Service) taskList(ctx context.Context, in platform.Inbound) (string, er
 	var b strings.Builder
 	b.WriteString("定时任务：\n")
 	for _, t := range tasks {
+		if t.Paused {
+			fmt.Fprintf(&b, "#%d %s（已暂停）\n", t.ID, t.Summary)
+			continue
+		}
 		fmt.Fprintf(&b, "#%d %s（下次 %s）\n", t.ID, t.Summary, t.NextRun.In(s.location()).Format("01-02 15:04"))
 	}
 	return strings.TrimSpace(b.String()), nil
@@ -106,7 +111,7 @@ func (s *Service) taskCreate(ctx context.Context, in platform.Inbound, text stri
 	if err != nil {
 		return "", err
 	}
-	if len(existing) >= s.taskLimit() {
+	if len(existing) >= s.taskLimit() && !looksLikeTaskManage(text) {
 		return fmt.Sprintf("这个聊天最多 %d 个定时任务，先用 /task del 删掉一些。", s.taskLimit()), nil
 	}
 	chat, err := s.Store.Chat(ctx, in.Platform, in.ChatID)
@@ -118,12 +123,22 @@ func (s *Service) taskCreate(ctx context.Context, in platform.Inbound, text stri
 		return "", err
 	}
 	now := s.now()
+	existingSpecs := make([]schedule.ExistingTask, len(existing))
+	for i, t := range existing {
+		existingSpecs[i] = schedule.ExistingTask{
+			ID:      t.ID,
+			Summary: t.Summary,
+			Prompt:  t.Prompt,
+			NextRun: t.NextRun,
+			Paused:  t.Paused,
+		}
+	}
 	// Parsing runs in a throwaway session so it never touches the chat's context.
 	result, err := s.Engine.Reply(ctx, grok.ReplyOptions{
 		SessionID:  sessionID,
 		NewSession: true,
 		Model:      chat.Model,
-		Prompt:     schedule.Prompt(text, now, s.location()),
+		Prompt:     schedule.Prompt(text, now, s.location(), existingSpecs...),
 		JSONSchema: schedule.Schema,
 	})
 	if err != nil {
@@ -136,6 +151,13 @@ func (s *Service) taskCreate(ctx context.Context, in platform.Inbound, text stri
 	}
 	if parsed.Error != "" {
 		return notUnderstood + "（" + parsed.Error + "）", nil
+	}
+	switch parsed.Action {
+	case "skip", "pause", "resume", "delete":
+		return s.taskManage(ctx, in, existing, parsed, now)
+	}
+	if len(existing) >= s.taskLimit() {
+		return fmt.Sprintf("这个聊天最多 %d 个定时任务，先用 /task del 删掉一些。", s.taskLimit()), nil
 	}
 	if strings.TrimSpace(parsed.Prompt) == "" {
 		return notUnderstood + "（没有说要做什么）", nil
@@ -168,6 +190,147 @@ func (s *Service) taskCreate(ctx context.Context, in platform.Inbound, text stri
 		return "", err
 	}
 	return fmt.Sprintf("已创建 #%d：%s。下次执行：%s。", id, summary, next.In(s.location()).Format("01-02 15:04")), nil
+}
+
+func (s *Service) taskManage(ctx context.Context, in platform.Inbound, existing []store.Task, parsed schedule.Parsed, now time.Time) (string, error) {
+	if len(existing) == 0 {
+		return "这个聊天没有定时任务。", nil
+	}
+	targetID := parsed.TaskID
+	if targetID == 0 && len(existing) == 1 {
+		targetID = existing[0].ID
+	}
+	var target *store.Task
+	for i := range existing {
+		if existing[i].ID == targetID {
+			target = &existing[i]
+			break
+		}
+	}
+	if target == nil {
+		return "请说明要操作哪个定时任务，或先发 /task list 查看。", nil
+	}
+	switch parsed.Action {
+	case "delete":
+		if _, err := s.Store.DeleteTask(ctx, in.Platform, in.ChatID, target.ID); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("已删除 #%d：%s。", target.ID, target.Summary), nil
+	case "pause":
+		if target.Paused {
+			return fmt.Sprintf("#%d（%s）已经处于暂停状态。", target.ID, target.Summary), nil
+		}
+		if err := s.Store.SetTaskPaused(ctx, target.ID, true, target.NextRun); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("已暂停 #%d：%s。", target.ID, target.Summary), nil
+	case "resume":
+		next, ok := taskNext(*target, now, s.location())
+		if !ok {
+			return fmt.Sprintf("#%d（%s）没有未来的执行时间，无法恢复。", target.ID, target.Summary), nil
+		}
+		if err := s.Store.SetTaskPaused(ctx, target.ID, false, next); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("已恢复 #%d：%s。下次执行：%s。", target.ID, target.Summary, next.In(s.location()).Format("01-02 15:04")), nil
+	case "skip":
+		base := target.NextRun
+		if base.Before(now) {
+			base = now
+		}
+		oldNext := target.NextRun.In(s.location()).Format("01-02 15:04")
+		next, ok := taskNext(*target, base, s.location())
+		if !ok {
+			if _, err := s.Store.DeleteTask(ctx, in.Platform, in.ChatID, target.ID); err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("已取消 #%d（%s）原定 %s 的执行（无后续周期，任务已结束）。", target.ID, target.Summary, oldNext), nil
+		}
+		if err := s.Store.SetNextRun(ctx, target.ID, next); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("已跳过 #%d（%s）原定 %s 的执行，下次执行顺延至：%s。", target.ID, target.Summary, oldNext, next.In(s.location()).Format("01-02 15:04")), nil
+	}
+	return notUnderstood, nil
+}
+
+func looksLikeTaskManage(text string) bool {
+	lower := strings.ToLower(text)
+	for _, kw := range []string{"暂停", "恢复", "继续", "跳过", "取消", "删", "停", "不执行", "不用", "pause", "resume", "skip", "cancel", "del"} {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// tryNaturalTask handles natural-language task creation, listing, skipping,
+// pausing, resuming and deletion in ordinary chat without requiring /task.
+func (s *Service) tryNaturalTask(ctx context.Context, in platform.Inbound) (string, bool, error) {
+	text := strings.TrimSpace(in.Text)
+	if text == "" {
+		return "", false, nil
+	}
+	if looksLikeTaskList(text) {
+		reply, err := s.taskList(ctx, in)
+		return reply, true, err
+	}
+	existing, err := s.Store.Tasks(ctx, in.Platform, in.ChatID)
+	if err != nil {
+		return "", false, err
+	}
+	if !looksLikeNaturalTask(text, len(existing) > 0) {
+		return "", false, nil
+	}
+	reply, err := s.taskCreate(ctx, in, text)
+	if err != nil {
+		return "", false, err
+	}
+	if strings.HasPrefix(reply, notUnderstood) && !mentionsTaskExplicitly(text) {
+		return "", false, nil
+	}
+	return reply, true, nil
+}
+
+func mentionsTaskExplicitly(text string) bool {
+	return strings.Contains(text, "定时任务") || strings.Contains(text, "周期任务")
+}
+
+func looksLikeTaskList(text string) bool {
+	if !mentionsTaskExplicitly(text) {
+		return false
+	}
+	if looksLikeTaskManage(text) {
+		return false
+	}
+	for _, kw := range []string{"查看", "看看", "看下", "看一下", "有哪些", "有什么", "列表", "list"} {
+		if strings.Contains( strings.ToLower(text), kw) {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeNaturalTask(text string, hasExisting bool) bool {
+	if mentionsTaskExplicitly(text) {
+		return true
+	}
+	for _, kw := range []string{"每天", "每日", "每周", "每个工作日", "每隔", "每小时", "提醒我"} {
+		if strings.Contains(text, kw) {
+			return true
+		}
+	}
+	if (strings.Contains(text, "按照") || strings.Contains(text, "根据")) && strings.Contains(text, "日期") {
+		return true
+	}
+	if hasExisting {
+		for _, kw := range []string{"取消明天", "明天不", "跳过下次", "跳过明天", "暂停", "恢复", "删除任务", "取消任务"} {
+			if strings.Contains(text, kw) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // RunScheduler runs due tasks every interval until ctx is cancelled.
@@ -274,6 +437,10 @@ func (s *Service) runTask(ctx context.Context, in platform.Inbound, out platform
 	defer end()
 	opts = withTurn(opts, turn, env)
 	result, err := s.Engine.Reply(ctx, opts)
+	if sandboxUnavailable(err) && opts.Sandbox != "" {
+		opts.Sandbox = ""
+		result, err = s.Engine.Reply(ctx, opts)
+	}
 	if err != nil {
 		slog.Error("task run failed", "task", t.ID, "err", err)
 		return header + "\n\n" + grok.UserFacing(err), nil
