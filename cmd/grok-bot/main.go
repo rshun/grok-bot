@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/rshun/grok-bot/internal/platform/discord"
 	"github.com/rshun/grok-bot/internal/platform/telegram"
 	"github.com/rshun/grok-bot/internal/sandbox"
+	"github.com/rshun/grok-bot/internal/schedule"
 	"github.com/rshun/grok-bot/internal/store"
 )
 
@@ -25,13 +27,22 @@ var version = "dev"
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if os.Getenv("TELEGRAM_BOT_TOKEN") == "" && os.Getenv("DISCORD_BOT_TOKEN") == "" {
+		config.LoadEnvFile(os.Getenv("BOT_ENV_FILE"), "/etc/grok-tg-bot.env", ".env")
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("config", "err", err)
 		os.Exit(1)
 	}
 	cfg.Version = version
-	workspace := filepath.Join(cfg.DataDir, "workspace")
+	isTaskRun := len(os.Args) == 3 && os.Args[1] == "run-task"
+	workspaceName := "workspace"
+	if isTaskRun {
+		// Isolated workspace so one-shot cron runs do not overwrite the daemon's MCP port config.
+		workspaceName = "task-workspace"
+	}
+	workspace := filepath.Join(cfg.DataDir, workspaceName)
 	if err := os.MkdirAll(workspace, 0o750); err != nil {
 		slog.Error("data dir", "err", err)
 		os.Exit(1)
@@ -116,6 +127,7 @@ func main() {
 		Location:        cfg.Location,
 		TaskLimit:       cfg.TaskLimit,
 		TaskMinInterval: cfg.TaskMinInterval,
+		Crontab:         buildCrontab(cfg.EnvFile),
 	}
 	type runner struct {
 		name string
@@ -151,7 +163,6 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	slog.Info("listening", logArgs...)
 	if actionsForSvc != nil {
 		go func() {
 			if err := actionsForSvc.Serve(ctx); err != nil {
@@ -159,6 +170,19 @@ func main() {
 			}
 		}()
 	}
+	if isTaskRun {
+		taskID, err := strconv.ParseInt(os.Args[2], 10, 64)
+		if err != nil {
+			slog.Error("run-task id", "arg", os.Args[2], "err", err)
+			os.Exit(1)
+		}
+		if err := svc.RunTaskByID(ctx, taskID); err != nil {
+			slog.Error("run-task", "id", taskID, "err", err)
+			os.Exit(1)
+		}
+		return
+	}
+	slog.Info("listening", logArgs...)
 	go svc.RunScheduler(ctx, 30*time.Second)
 	errCh := make(chan error, len(runners))
 	for _, item := range runners {
@@ -182,4 +206,21 @@ func main() {
 	if failed {
 		os.Exit(1)
 	}
+}
+
+func buildCrontab(envFile string) *schedule.Crontab {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil
+	}
+	if real, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = real
+	}
+	wd, _ := os.Getwd()
+	if envFile != "" {
+		if _, err := os.Stat(envFile); err != nil {
+			envFile = ""
+		}
+	}
+	return schedule.NewSystemCrontab(exe, wd, envFile)
 }

@@ -294,3 +294,29 @@ func parseDateLine(line string, loc *time.Location) (time.Time, error) {
 		return time.Time{}, errors.New("invalid date format")
 	}
 }
+
+// MatchesRun reports whether a cron trigger at now should execute a task whose
+// recorded nextRun is nextRun. It honours skipped runs (nextRun in the future)
+// and re-checks DateFile live for "dates" tasks.
+func (s Spec) MatchesRun(now, nextRun time.Time, loc *time.Location) bool {
+	if loc == nil {
+		loc = time.Local
+	}
+	if !nextRun.IsZero() && nextRun.After(now.Add(45*time.Second)) {
+		return false
+	}
+	if s.Kind == "dates" {
+		dates, err := readDateFile(s.DateFile, loc)
+		if err != nil {
+			return false
+		}
+		local := now.In(loc)
+		for _, d := range dates {
+			if d.Year() == local.Year() && d.Month() == local.Month() && d.Day() == local.Day() {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}

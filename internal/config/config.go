@@ -185,3 +185,34 @@ func digits(s string) bool {
 	}
 	return true
 }
+
+// LoadEnvFile populates unset environment variables from the first readable KEY=VALUE file.
+func LoadEnvFile(paths ...string) {
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		for _, raw := range strings.Split(string(data), "\n") {
+			line := strings.TrimSpace(raw)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+			k, v, ok := strings.Cut(line, "=")
+			if !ok {
+				continue
+			}
+			k = strings.TrimSpace(k)
+			v = strings.Trim(strings.TrimSpace(v), `"'`)
+			if k != "" && os.Getenv(k) == "" {
+				_ = os.Setenv(k, v)
+			}
+		}
+		return
+	}
+}

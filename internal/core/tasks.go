@@ -78,6 +78,7 @@ func (s *Service) taskCommand(ctx context.Context, in platform.Inbound, arg stri
 		if !removed {
 			return "没有这个任务。", nil
 		}
+		s.syncCrontab(ctx)
 		return fmt.Sprintf("已删除 #%d。", id), nil
 	case fields[0] == "del" && len(fields) == 1:
 		return taskUsage, nil
@@ -189,6 +190,7 @@ func (s *Service) taskCreate(ctx context.Context, in platform.Inbound, text stri
 	if err != nil {
 		return "", err
 	}
+	s.syncCrontab(ctx)
 	return fmt.Sprintf("已创建 #%d：%s。下次执行：%s。", id, summary, next.In(s.location()).Format("01-02 15:04")), nil
 }
 
@@ -215,6 +217,7 @@ func (s *Service) taskManage(ctx context.Context, in platform.Inbound, existing 
 		if _, err := s.Store.DeleteTask(ctx, in.Platform, in.ChatID, target.ID); err != nil {
 			return "", err
 		}
+		s.syncCrontab(ctx)
 		return fmt.Sprintf("已删除 #%d：%s。", target.ID, target.Summary), nil
 	case "pause":
 		if target.Paused {
@@ -223,6 +226,7 @@ func (s *Service) taskManage(ctx context.Context, in platform.Inbound, existing 
 		if err := s.Store.SetTaskPaused(ctx, target.ID, true, target.NextRun); err != nil {
 			return "", err
 		}
+		s.syncCrontab(ctx)
 		return fmt.Sprintf("已暂停 #%d：%s。", target.ID, target.Summary), nil
 	case "resume":
 		next, ok := taskNext(*target, now, s.location())
@@ -232,6 +236,7 @@ func (s *Service) taskManage(ctx context.Context, in platform.Inbound, existing 
 		if err := s.Store.SetTaskPaused(ctx, target.ID, false, next); err != nil {
 			return "", err
 		}
+		s.syncCrontab(ctx)
 		return fmt.Sprintf("已恢复 #%d：%s。下次执行：%s。", target.ID, target.Summary, next.In(s.location()).Format("01-02 15:04")), nil
 	case "skip":
 		base := target.NextRun
@@ -244,11 +249,13 @@ func (s *Service) taskManage(ctx context.Context, in platform.Inbound, existing 
 			if _, err := s.Store.DeleteTask(ctx, in.Platform, in.ChatID, target.ID); err != nil {
 				return "", err
 			}
+			s.syncCrontab(ctx)
 			return fmt.Sprintf("已取消 #%d（%s）原定 %s 的执行（无后续周期，任务已结束）。", target.ID, target.Summary, oldNext), nil
 		}
 		if err := s.Store.SetNextRun(ctx, target.ID, next); err != nil {
 			return "", err
 		}
+		s.syncCrontab(ctx)
 		return fmt.Sprintf("已跳过 #%d（%s）原定 %s 的执行，下次执行顺延至：%s。", target.ID, target.Summary, oldNext, next.In(s.location()).Format("01-02 15:04")), nil
 	}
 	return notUnderstood, nil
@@ -333,9 +340,15 @@ func looksLikeNaturalTask(text string, hasExisting bool) bool {
 	return false
 }
 
-// RunScheduler runs due tasks every interval until ctx is cancelled.
+// RunScheduler syncs tasks into system crontab when available; otherwise it runs
+// due tasks every interval until ctx is cancelled.
 func (s *Service) RunScheduler(ctx context.Context, every time.Duration) {
 	s.catchUp(ctx)
+	s.syncCrontab(ctx)
+	if s.Crontab != nil {
+		<-ctx.Done()
+		return
+	}
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	for {
@@ -346,6 +359,67 @@ func (s *Service) RunScheduler(ctx context.Context, every time.Duration) {
 			s.runDue(ctx)
 		}
 	}
+}
+
+func (s *Service) syncCrontab(ctx context.Context) {
+	if s.Crontab == nil {
+		return
+	}
+	tasks, err := s.Store.AllTasks(ctx)
+	if err != nil {
+		slog.Error("load tasks for crontab", "err", err)
+		return
+	}
+	entries := make([]schedule.CronEntry, len(tasks))
+	for i, t := range tasks {
+		entries[i] = schedule.CronEntry{
+			ID:      t.ID,
+			Spec:    t.Spec,
+			Summary: t.Summary,
+			NextRun: t.NextRun,
+			Paused:  t.Paused,
+		}
+	}
+	if err := s.Crontab.Sync(entries, s.location()); err != nil {
+		slog.Error("sync crontab", "err", err)
+	}
+}
+
+// RunTaskByID executes a single scheduled task triggered by system crontab (`grok-bot run-task <id>`).
+func (s *Service) RunTaskByID(ctx context.Context, id int64) error {
+	t, ok, err := s.Store.TaskByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !ok || t.Paused {
+		return nil
+	}
+	var spec schedule.Spec
+	if err := json.Unmarshal([]byte(t.Spec), &spec); err != nil {
+		return fmt.Errorf("bad task spec %d: %w", t.ID, err)
+	}
+	now := s.now()
+	if !spec.MatchesRun(now, t.NextRun, s.location()) {
+		return nil
+	}
+	if next, hasNext := spec.Next(now, s.location()); hasNext {
+		err = s.Store.SetNextRun(ctx, t.ID, next)
+	} else {
+		_, err = s.Store.DeleteTask(ctx, t.Platform, t.ChatID, t.ID)
+	}
+	if err != nil {
+		return err
+	}
+	s.syncCrontab(ctx)
+	out := s.Senders[t.Platform]
+	if out == nil {
+		return fmt.Errorf("no sender for platform %q", t.Platform)
+	}
+	in := platform.Inbound{Platform: t.Platform, ChatID: t.ChatID, UserID: t.UserID, Text: t.Prompt, TextMessage: true}
+	text, files := s.runTask(ctx, in, out, t)
+	s.send(ctx, out, t.ChatID, text)
+	s.flushFiles(ctx, out, t.ChatID, "", files)
+	return nil
 }
 
 // catchUp skips runs missed while the bot was down instead of running them late.

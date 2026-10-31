@@ -274,6 +274,20 @@ func (s *Store) Tasks(ctx context.Context, platform, chatID string) ([]Task, err
 	return s.queryTasks(ctx, `WHERE platform = ? AND chat_id = ? ORDER BY id`, platform, chatID)
 }
 
+// AllTasks lists every scheduled task across all chats ordered by id.
+func (s *Store) AllTasks(ctx context.Context) ([]Task, error) {
+	return s.queryTasks(ctx, `ORDER BY id`)
+}
+
+// TaskByID loads a single task by id.
+func (s *Store) TaskByID(ctx context.Context, id int64) (Task, bool, error) {
+	tasks, err := s.queryTasks(ctx, `WHERE id = ?`, id)
+	if err != nil || len(tasks) == 0 {
+		return Task{}, false, err
+	}
+	return tasks[0], true, nil
+}
+
 // DeleteTask removes a task only if it belongs to the given chat.
 func (s *Store) DeleteTask(ctx context.Context, platform, chatID string, id int64) (bool, error) {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM tasks WHERE id = ? AND platform = ? AND chat_id = ?`, id, platform, chatID)

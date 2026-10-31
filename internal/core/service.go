@@ -15,6 +15,7 @@ import (
 	"github.com/rshun/grok-bot/internal/grok"
 	"github.com/rshun/grok-bot/internal/platform"
 	"github.com/rshun/grok-bot/internal/sandbox"
+	"github.com/rshun/grok-bot/internal/schedule"
 	"github.com/rshun/grok-bot/internal/store"
 )
 
@@ -47,6 +48,8 @@ type Service struct {
 	Location        *time.Location
 	TaskLimit       int
 	TaskMinInterval time.Duration
+	// Crontab syncs scheduled tasks into the OS user crontab when non-nil.
+	Crontab *schedule.Crontab
 	// ProgressInterval is the shortest gap between edits of a progress message; 0 means 3 seconds.
 	ProgressInterval time.Duration
 	// ImageLoadTimeout bounds downloading the pictures of one message; 0 means 3 minutes.
