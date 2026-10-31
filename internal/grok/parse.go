@@ -393,6 +393,8 @@ func UserFacing(err error) string {
 	case strings.Contains(lower, "login"),
 		strings.Contains(lower, "unauthorized"),
 		strings.Contains(lower, "authentication"),
+		strings.Contains(lower, "billing http 401"),
+		strings.Contains(lower, "billing http 403"),
 		strings.Contains(lower, "auth"):
 		return "grok 未登录或登录已过期。在运行 bot 的这个用户下执行 grok login 后再试。"
 	case IsMaxTurns(err):

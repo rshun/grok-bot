@@ -321,6 +321,19 @@ func TestTelegramDoesNotReMarkReceived(t *testing.T) {
 	}
 }
 
+func TestProgressDisabledByDefault(t *testing.T) {
+	svc, _ := testService(t)
+	ev := &progressEvents{}
+	handleHello(svc, fakeProgressOut{ev: ev}, "hello")
+	got := ev.waitFor(t, 2)
+	time.Sleep(50 * time.Millisecond)
+	want := []string{"receipt", "send:pong"}
+	if strings.Join(ev.snapshot(), "|") != strings.Join(want, "|") {
+		t.Fatalf("got %#v, want %#v", ev.snapshot(), want)
+	}
+	_ = got
+}
+
 func TestScheduledTaskHasNoProgress(t *testing.T) {
 	svc, _ := progressService(t)
 	ev := &progressEvents{}

@@ -124,6 +124,9 @@ func (s *Service) startProgress(ctx context.Context, it item) *progressView {
 			}
 		}
 	}
+	if !s.ShowProgress && s.ProgressInterval <= 0 {
+		return nil
+	}
 	handle, err := progress.StartProgress(ctx, it.in, progressStartText)
 	if err != nil {
 		// Error values can embed request URLs, so only the platform is logged.

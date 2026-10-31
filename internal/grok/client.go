@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -448,20 +449,64 @@ func (c *Client) Models(ctx context.Context) (ModelList, error) {
 	return list, nil
 }
 
+type statusError struct {
+	code int
+}
+
+func (e statusError) Error() string {
+	return fmt.Sprintf("billing http %d", e.code)
+}
+
+func isAuthStatus(err error) bool {
+	var se statusError
+	return errors.As(err, &se) && (se.code == http.StatusUnauthorized || se.code == http.StatusForbidden)
+}
+
 func (c *Client) Allowance(ctx context.Context) (Allowance, error) {
-	token, err := readToken(c.AuthPath)
+	tokens, err := readTokens(c.AuthPath)
 	if err != nil {
 		return Allowance{}, err
 	}
-	billing, err := c.getJSON(ctx, c.BillingURL, token)
+	billing, usedToken, err := c.fetchBillingWithTokens(ctx, tokens)
+	if err != nil && isAuthStatus(err) && c.Bin != "" {
+		// An idle access token in auth.json may have expired; running `grok models` triggers
+		// the CLI's built-in refresh_token exchange before we re-read auth.json once.
+		_ = c.refreshAuth(ctx)
+		if fresh, readErr := readTokens(c.AuthPath); readErr == nil && len(fresh) > 0 {
+			billing, usedToken, err = c.fetchBillingWithTokens(ctx, fresh)
+		}
+	}
 	if err != nil {
 		return Allowance{}, err
 	}
-	userBody, userErr := c.getJSON(ctx, c.UserURL, token)
+	userBody, userErr := c.getJSON(ctx, c.UserURL, usedToken)
 	if userErr != nil {
 		userBody = nil
 	}
 	return ParseAllowance(billing, userBody)
+}
+
+func (c *Client) fetchBillingWithTokens(ctx context.Context, tokens []string) ([]byte, string, error) {
+	var lastErr error
+	for _, token := range tokens {
+		body, err := c.getJSON(ctx, c.BillingURL, token)
+		if err == nil {
+			return body, token, nil
+		}
+		lastErr = err
+		if !isAuthStatus(err) {
+			return nil, "", err
+		}
+	}
+	return nil, "", lastErr
+}
+
+func (c *Client) refreshAuth(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, c.Bin, "models")
+	cmd.Env = envWithoutUpdate()
+	return cmd.Run()
 }
 
 func (c *Client) getJSON(ctx context.Context, url, token string) ([]byte, error) {
@@ -486,52 +531,112 @@ func (c *Client) getJSON(ctx context.Context, url, token string) ([]byte, error)
 		return nil, err
 	}
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("billing http %d", res.StatusCode)
+		return nil, statusError{code: res.StatusCode}
 	}
 	return body, nil
 }
 
-func readToken(path string) (string, error) {
+type tokenCandidate struct {
+	key        string
+	preferGrok bool
+	expiresAt  int64
+}
+
+func readTokens(path string) ([]string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("read grok auth: %w", err)
+		return nil, fmt.Errorf("read grok auth: %w", err)
 	}
 	var doc any
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		return "", fmt.Errorf("parse grok auth: %w", err)
+		return nil, fmt.Errorf("parse grok auth: %w", err)
 	}
-	token := findToken(doc)
-	if token == "" {
-		return "", fmt.Errorf("grok auth has no session token")
+	var cands []tokenCandidate
+	collectTokens(doc, "", &cands)
+	if len(cands) == 0 {
+		return nil, fmt.Errorf("grok auth has no session token")
 	}
-	return token, nil
+	sort.SliceStable(cands, func(i, j int) bool {
+		if cands[i].preferGrok != cands[j].preferGrok {
+			return cands[i].preferGrok
+		}
+		return cands[i].expiresAt > cands[j].expiresAt
+	})
+	seen := make(map[string]bool, len(cands))
+	out := make([]string, 0, len(cands))
+	for _, c := range cands {
+		if !seen[c.key] {
+			seen[c.key] = true
+			out = append(out, c.key)
+		}
+	}
+	return out, nil
 }
 
-func findToken(v any) string {
-	obj, ok := v.(map[string]any)
-	if !ok {
-		items, ok := v.([]any)
-		if !ok {
-			return ""
-		}
-		for _, item := range items {
-			if token := findToken(item); token != "" {
-				return token
+func collectTokens(v any, parentKey string, out *[]tokenCandidate) {
+	switch node := v.(type) {
+	case map[string]any:
+		if key, _ := node["key"].(string); len(key) > 20 {
+			if _, hasRefresh := node["refresh_token"]; hasRefresh {
+				lowerParent := strings.ToLower(parentKey)
+				*out = append(*out, tokenCandidate{
+					key:        key,
+					preferGrok: strings.Contains(lowerParent, "grok"),
+					expiresAt:  extractExpiry(node, key),
+				})
 			}
 		}
-		return ""
-	}
-	if key, _ := obj["key"].(string); len(key) > 20 {
-		if _, hasRefresh := obj["refresh_token"]; hasRefresh {
-			return key
+		keys := make([]string, 0, len(node))
+		for k := range node {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			nextParent := k
+			if parentKey != "" {
+				nextParent = parentKey + "." + k
+			}
+			collectTokens(node[k], nextParent, out)
+		}
+	case []any:
+		for _, item := range node {
+			collectTokens(item, parentKey, out)
 		}
 	}
-	for _, child := range obj {
-		if token := findToken(child); token != "" {
-			return token
+}
+
+func extractExpiry(node map[string]any, key string) int64 {
+	for _, field := range []string{"expires_at", "expiresAt", "expiry", "exp", "updated_at", "updatedAt"} {
+		switch val := node[field].(type) {
+		case float64:
+			if val > 1e12 {
+				return int64(val / 1000)
+			}
+			return int64(val)
+		case string:
+			if t, err := time.Parse(time.RFC3339, val); err == nil {
+				return t.Unix()
+			}
+			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+				if n > 1e12 {
+					return n / 1000
+				}
+				return n
+			}
 		}
 	}
-	return ""
+	// Fall back to JWT exp claim when key is a 3-part JWT.
+	if parts := strings.Split(key, "."); len(parts) == 3 {
+		if payload, err := base64.RawURLEncoding.DecodeString(parts[1]); err == nil {
+			var claims struct {
+				Exp int64 `json:"exp"`
+			}
+			if json.Unmarshal(payload, &claims) == nil && claims.Exp > 0 {
+				return claims.Exp
+			}
+		}
+	}
+	return 0
 }
 
 // botEnvKeys are the bot's own settings from config.Load. grok and its MCP
@@ -547,6 +652,7 @@ var botEnvKeys = map[string]bool{
 	"DEFAULT_MODEL":            true,
 	"WEB_SEARCH":               true,
 	"ALLOW_SHELL":              true,
+	"SHOW_PROGRESS":            true,
 	"GROK_MAX_TURNS":           true,
 	"BOT_ENV_FILE":             true,
 	"TIMEZONE":                 true,
