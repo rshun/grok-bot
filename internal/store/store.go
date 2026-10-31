@@ -99,6 +99,10 @@ func (s *Store) migrate() error {
 			mode TEXT NOT NULL CHECK (mode IN ('ro', 'rw')),
 			created_at TEXT NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS settings (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
 		CREATE TABLE IF NOT EXISTS tasks (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			platform TEXT NOT NULL,
@@ -316,6 +320,35 @@ func (s *Store) SetTaskPaused(ctx context.Context, id int64, paused bool, next t
 		flag = 1
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET paused = ?, next_run = ? WHERE id = ?`, flag, next.UTC().Format(runLayout), id)
+	return err
+}
+
+// UpdateTask updates the schedule, prompt, summary and next run time of an existing task.
+func (s *Store) UpdateTask(ctx context.Context, id int64, spec, prompt, summary string, next time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE tasks SET spec = ?, prompt = ?, summary = ?, next_run = ?, paused = 0 WHERE id = ?`,
+		spec, prompt, summary, next.UTC().Format(runLayout), id)
+	return err
+}
+
+// Setting reads a persisted key-value setting.
+func (s *Store) Setting(ctx context.Context, key string) (string, bool, error) {
+	var val string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&val)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return val, true, nil
+}
+
+// PutSetting writes a persisted key-value setting.
+func (s *Store) PutSetting(ctx context.Context, key, value string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		key, value)
 	return err
 }
 

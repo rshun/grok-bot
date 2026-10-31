@@ -117,6 +117,17 @@ func TestReplyArgsWebSearch(t *testing.T) {
 	if argValue(t, args, "-r") != "sess" {
 		t.Fatalf("resume flag: %q", args)
 	}
+
+	withShell := base
+	withShell.ShellTools = true
+	shellArgs := replyArgs("/ws", withShell)
+	tools = argValue(t, shellArgs, "--disallowed-tools")
+	if hasTool(tools, "run_terminal_cmd") || hasTool(tools, "run_terminal_command") {
+		t.Fatalf("shell tools still disallowed when ShellTools=true: %s", tools)
+	}
+	if !strings.Contains(argValue(t, shellArgs, "--system-prompt-override"), "run_terminal_cmd") {
+		t.Fatal("system prompt does not mention run_terminal_cmd")
+	}
 }
 
 var wantFileTools = []string{"read_file", "list_dir", "grep", "search_replace", "write"}

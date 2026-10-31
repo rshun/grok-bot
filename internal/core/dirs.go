@@ -111,7 +111,64 @@ func (s *Service) applyGrants(ctx context.Context, text string) []string {
 			notes = append(notes, "文件功能当前不可用："+reason)
 		}
 	}
+	if mode, ok := parseShellToggle(text); ok {
+		if err := s.Store.PutSetting(ctx, "allow_shell", mode); err != nil {
+			slog.Error("save allow_shell", "err", err)
+			notes = append(notes, "保存命令执行开关失败。")
+		} else if mode == "true" {
+			notes = append(notes, "已开启服务器命令执行权限。")
+		} else {
+			notes = append(notes, "已关闭服务器命令执行权限。")
+		}
+	}
 	return notes
+}
+
+func parseShellToggle(text string) (string, bool) {
+	trimmed := strings.TrimSpace(text)
+	for _, on := range []string{"开启命令执行", "允许执行命令", "打开命令执行"} {
+		if strings.Contains(trimmed, on) {
+			return "true", true
+		}
+	}
+	for _, off := range []string{"关闭命令执行", "禁止执行命令", "取消命令执行"} {
+		if strings.Contains(trimmed, off) {
+			return "false", true
+		}
+	}
+	return "", false
+}
+
+func (s *Service) shellEnabled(ctx context.Context) bool {
+	if s.Store != nil {
+		if val, ok, err := s.Store.Setting(ctx, "allow_shell"); err == nil && ok {
+			return val == "true"
+		}
+	}
+	return s.AllowShell
+}
+
+func (s *Service) shellCommand(ctx context.Context, arg string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(arg)) {
+	case "":
+		state := "已关闭"
+		if s.shellEnabled(ctx) {
+			state = "已开启"
+		}
+		return "当前服务器命令执行：" + state + "。\n用法：/shell on 开启，/shell off 关闭（或直接说「开启命令执行」/「关闭命令执行」）。", nil
+	case "on", "true", "1", "enable":
+		if err := s.Store.PutSetting(ctx, "allow_shell", "true"); err != nil {
+			return "", err
+		}
+		return "已开启服务器命令执行权限。", nil
+	case "off", "false", "0", "disable":
+		if err := s.Store.PutSetting(ctx, "allow_shell", "false"); err != nil {
+			return "", err
+		}
+		return "已关闭服务器命令执行权限。", nil
+	default:
+		return "用法：/shell on 开启，/shell off 关闭。", nil
+	}
 }
 
 // grantDir checks a path and records it as writable. Errors are for the chat user.
@@ -198,8 +255,9 @@ func (s *Service) fileAccess(ctx context.Context) (ready bool, profile string, r
 	return true, profile, rw, ""
 }
 
-// newSessionOptions fills the sandbox fields for a brand-new session and returns the profile to record.
+// newSessionOptions fills the sandbox and shell fields for a brand-new session and returns the profile to record.
 func (s *Service) newSessionOptions(ctx context.Context, opts *grok.ReplyOptions) string {
+	opts.ShellTools = s.shellEnabled(ctx)
 	ready, profile, rw, _ := s.fileAccess(ctx)
 	if !ready {
 		return ""

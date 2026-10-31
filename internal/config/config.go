@@ -31,6 +31,7 @@ type Config struct {
 	GrokTimeout   time.Duration
 	QueueLimit    int
 	WebSearch     bool
+	AllowShell    bool
 	EnvFile       string
 	// Location is the time zone for scheduled tasks.
 	Location        *time.Location
@@ -88,6 +89,13 @@ func Load() (Config, error) {
 		webSearch, err = strconv.ParseBool(raw)
 		if err != nil {
 			return Config{}, fmt.Errorf("WEB_SEARCH must be true or false")
+		}
+	}
+	allowShell := false
+	if raw := strings.TrimSpace(os.Getenv("ALLOW_SHELL")); raw != "" {
+		allowShell, err = strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("ALLOW_SHELL must be true or false")
 		}
 	}
 	envFile := strings.TrimSpace(os.Getenv("BOT_ENV_FILE"))
@@ -149,6 +157,7 @@ func Load() (Config, error) {
 		GrokTimeout:     timeout,
 		QueueLimit:      queueLimit,
 		WebSearch:       webSearch,
+		AllowShell:      allowShell,
 		EnvFile:         envFile,
 		Location:        location,
 		TaskLimit:       taskLimit,

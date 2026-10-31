@@ -149,16 +149,22 @@ func mergeAlbum(parts []albumPart) (platform.Inbound, platform.Replier) {
 	}
 	in := lead.in
 	in.Images = nil
+	in.Files = nil
 	in.Skipped = false
 	for _, p := range parts {
 		in.Images = append(in.Images, p.in.Images...)
+		in.Files = append(in.Files, p.in.Files...)
 		in.Skipped = in.Skipped || p.in.Skipped
 	}
 	if len(in.Images) > platform.MaxImages {
 		in.Images = in.Images[:platform.MaxImages]
 		in.Skipped = true
 	}
-	// An album with no picture Grok can take (videos only, say) is not a usable message.
-	in.TextMessage = len(in.Images) > 0
+	if len(in.Files) > platform.MaxFiles {
+		in.Files = in.Files[:platform.MaxFiles]
+		in.Skipped = true
+	}
+	// An album with no picture or document Grok can take (videos only, say) is not a usable message.
+	in.TextMessage = len(in.Images) > 0 || len(in.Files) > 0
 	return in, lead.reply
 }

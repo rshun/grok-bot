@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -25,31 +26,47 @@ func imageMIME(a *discordgo.MessageAttachment) string {
 	return platform.ImageMIMEByName(a.Filename)
 }
 
-// attachmentImages splits the attachments into pictures and a flag for everything left out.
-func attachmentImages(atts []*discordgo.MessageAttachment) (images []platform.Image, skipped bool) {
+// splitAttachments splits attachments into vision images, general document files, and whether anything exceeded caps.
+func splitAttachments(atts []*discordgo.MessageAttachment) (images []platform.Image, files []platform.Attachment, skipped bool) {
 	for _, a := range atts {
 		if a == nil {
 			continue
 		}
-		mime := imageMIME(a)
-		if mime == "" || len(images) >= platform.MaxImages {
+		url := a.URL
+		if mime := imageMIME(a); mime != "" {
+			if len(images) >= platform.MaxImages {
+				skipped = true
+				continue
+			}
+			images = append(images, platform.Image{
+				MIME: mime,
+				Name: a.Filename,
+				Size: int64(a.Size),
+				Load: func(ctx context.Context) ([]byte, error) { return download(ctx, url, platform.ReadImage) },
+			})
+			continue
+		}
+		if len(files) >= platform.MaxFiles {
 			skipped = true
 			continue
 		}
-		url := a.URL
-		images = append(images, platform.Image{
-			MIME: mime,
-			Name: a.Filename,
+		name := strings.TrimSpace(a.Filename)
+		if name == "" {
+			name = "attachment"
+		}
+		files = append(files, platform.Attachment{
+			MIME: strings.TrimSpace(a.ContentType),
+			Name: name,
 			Size: int64(a.Size),
-			Load: func(ctx context.Context) ([]byte, error) { return download(ctx, url) },
+			Load: func(ctx context.Context) ([]byte, error) { return download(ctx, url, platform.ReadAttachment) },
 		})
 	}
-	return images, skipped
+	return images, files, skipped
 }
 
 // download fetches one attachment. The CDN link carries a signature, so no returned error
 // contains the URL.
-func download(ctx context.Context, url string) ([]byte, error) {
+func download(ctx context.Context, url string, readBody func(io.Reader) ([]byte, error)) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -68,11 +85,11 @@ func download(ctx context.Context, url string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("discord download failed: status %d", resp.StatusCode)
 	}
-	data, err := platform.ReadImage(resp.Body)
+	data, err := readBody(resp.Body)
 	switch {
 	case ctx.Err() != nil:
 		return nil, ctx.Err()
-	case errors.Is(err, platform.ErrImageTooLarge):
+	case errors.Is(err, platform.ErrImageTooLarge), errors.Is(err, platform.ErrFileTooLarge):
 		return nil, err
 	case err != nil:
 		return nil, errors.New("discord download failed")

@@ -27,7 +27,7 @@ func TestInboundImageAttachments(t *testing.T) {
 		&discordgo.MessageAttachment{ID: "2", Filename: "b.jpg", ContentType: "image/jpeg; charset=binary", Size: 20, URL: "https://cdn.example.invalid/b.jpg"},
 		&discordgo.MessageAttachment{ID: "3", Filename: "c.zip", ContentType: "application/zip", Size: 30},
 	), "bot")
-	if !ok || !in.TextMessage || !in.Skipped || in.Text != "look" || len(in.Images) != 2 {
+	if !ok || !in.TextMessage || in.Skipped || in.Text != "look" || len(in.Images) != 2 || len(in.Files) != 1 || in.Files[0].Name != "c.zip" {
 		t.Fatalf("ok=%v in=%#v", ok, in)
 	}
 	if in.Images[0].MIME != "image/png" || in.Images[0].Name != "a.png" || in.Images[0].Size != 10 || in.Images[0].Load == nil {
@@ -40,7 +40,7 @@ func TestInboundImageAttachments(t *testing.T) {
 	in, ok = messageInbound(attachmentMessage("caption",
 		&discordgo.MessageAttachment{ID: "3", Filename: "c.zip", ContentType: "application/zip"},
 	), "bot")
-	if !ok || in.TextMessage || len(in.Images) != 0 {
+	if !ok || !in.TextMessage || len(in.Images) != 0 || len(in.Files) != 1 {
 		t.Fatalf("ok=%v in=%#v", ok, in)
 	}
 
@@ -57,10 +57,10 @@ func TestInboundImageByExtension(t *testing.T) {
 	in, _ := messageInbound(attachmentMessage("",
 		&discordgo.MessageAttachment{ID: "1", Filename: "Photo.JPG"},
 		&discordgo.MessageAttachment{ID: "2", Filename: "x.webp"},
-		&discordgo.MessageAttachment{ID: "3", Filename: "x.png", ContentType: "application/octet-stream"}, // a stated type wins
+		&discordgo.MessageAttachment{ID: "3", Filename: "x.png", ContentType: "application/octet-stream"}, // a stated type wins -> file attachment
 		&discordgo.MessageAttachment{ID: "4", Filename: "x.svg"},
 	), "bot")
-	if len(in.Images) != 2 || in.Images[0].MIME != "image/jpeg" || in.Images[1].MIME != "image/webp" || !in.Skipped {
+	if len(in.Images) != 2 || in.Images[0].MIME != "image/jpeg" || in.Images[1].MIME != "image/webp" || len(in.Files) != 2 || in.Skipped {
 		t.Fatalf("%#v", in)
 	}
 }

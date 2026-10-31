@@ -148,8 +148,57 @@ func TestUnsupportedOnly(t *testing.T) {
 		Platform: "telegram", ChatID: "9", UserID: "1", Skipped: true,
 	}, capture{rec})
 	got := rec.wait(t, 1)
-	if got[0] != "目前只处理文字和图片。" || len(engine.calls) != 0 {
+	if got[0] != "目前只处理文字、图片和文件。" || len(engine.calls) != 0 {
 		t.Fatalf("%#v", got)
+	}
+}
+
+func TestReplyQuoteAndFileUploadAndShellToggle(t *testing.T) {
+	svc, engine := testService(t)
+	svc.UploadDir = t.TempDir()
+	rec := &recorder{}
+
+	// 1. Reply quote + uploaded file + natural-language shell toggle
+	svc.Handle(context.Background(), platform.Inbound{
+		Platform:    "telegram",
+		ChatID:      "9",
+		UserID:      "1",
+		Text:        "开启命令执行，并看看这个日志",
+		ReplyToText: "⏰ 定时任务 #1：发现异常",
+		TextMessage: true,
+		Files: []platform.Attachment{{
+			Name: "app.log",
+			MIME: "text/plain",
+			Size: 11,
+			Load: func(context.Context) ([]byte, error) { return []byte("ERROR line1"), nil },
+		}},
+	}, capture{rec})
+	got := rec.wait(t, 1)
+	if !strings.Contains(got[0], "已开启服务器命令执行权限。") {
+		t.Fatalf("expected shell confirmation, got %#v", got)
+	}
+	engine.mu.Lock()
+	call := engine.calls[0]
+	engine.mu.Unlock()
+	if !call.ShellTools {
+		t.Fatalf("expected ShellTools=true on turn, got %#v", call)
+	}
+	for _, want := range []string{"[用户正在引用以下消息进行回复]", "⏰ 定时任务 #1：发现异常", "[用户上传了文件:", "app.log", "ERROR line1"} {
+		if !strings.Contains(call.Prompt, want) {
+			t.Fatalf("missing %q in prompt:\n%s", want, call.Prompt)
+		}
+	}
+
+	// 2. /shell off command
+	svc.Handle(context.Background(), platform.Inbound{
+		Platform: "telegram", ChatID: "9", UserID: "1", Text: "/shell off", TextMessage: true,
+	}, capture{rec})
+	got = rec.wait(t, 2)
+	if got[1] != "已关闭服务器命令执行权限。" {
+		t.Fatalf("got %q", got[1])
+	}
+	if svc.shellEnabled(context.Background()) {
+		t.Fatal("expected shellEnabled=false after /shell off")
 	}
 }
 
