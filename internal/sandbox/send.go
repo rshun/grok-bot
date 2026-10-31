@@ -34,6 +34,9 @@ func (p Policy) CheckSendable(path string) (real string, size int64, err error) 
 	if err != nil {
 		return "", 0, sendReadError(err)
 	}
+	if info.IsDir() {
+		return "", 0, errors.New("这是目录，不是普通文件；请用 list_dir 查看目录内容。")
+	}
 	if !info.Mode().IsRegular() {
 		return "", 0, errors.New("这不是普通文件。")
 	}

@@ -287,7 +287,7 @@ func toolList(t *Turn) []map[string]any {
 	if t.CheckFile != nil {
 		tools = append(tools, map[string]any{
 			"name":        "send_file",
-			"description": "Send a file from this machine to the user. path must be absolute.",
+			"description": "Send a regular file from this machine to the user (not a directory; use list_dir to list directories). path must be absolute.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{

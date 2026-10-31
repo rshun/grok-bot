@@ -141,7 +141,7 @@ func TestReplyArgsFiles(t *testing.T) {
 	}
 	prompt := argValue(t, args, "--system-prompt-override")
 	for _, want := range []string{
-		"You may read any file the system lets you read.",
+		"You may list any directory and read any file the system lets you read (using list_dir, read_file, and grep).",
 		"You may write only in: /srv/out.",
 		"Never run files or commands.",
 	} {
