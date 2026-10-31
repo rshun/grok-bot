@@ -35,6 +35,7 @@ type Task struct {
 	Prompt   string
 	Summary  string
 	NextRun  time.Time
+	Paused   bool
 }
 
 // runLayout is fixed-width UTC so next_run compares correctly as text.
@@ -111,7 +112,19 @@ func (s *Store) migrate() error {
 		);
 		CREATE INDEX IF NOT EXISTS tasks_next_run ON tasks (next_run);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	hasTaskPaused, err := s.hasColumn("tasks", "paused")
+	if err != nil {
+		return err
+	}
+	if !hasTaskPaused {
+		if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN paused INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) hasColumn(table, column string) (bool, error) {
@@ -271,9 +284,9 @@ func (s *Store) DeleteTask(ctx context.Context, platform, chatID string, id int6
 	return n > 0, err
 }
 
-// DueTasks returns tasks whose next run is at or before now.
+// DueTasks returns unpaused tasks whose next run is at or before now.
 func (s *Store) DueTasks(ctx context.Context, now time.Time) ([]Task, error) {
-	return s.queryTasks(ctx, `WHERE next_run <= ? ORDER BY next_run, id`, now.UTC().Format(runLayout))
+	return s.queryTasks(ctx, `WHERE paused = 0 AND next_run <= ? ORDER BY next_run, id`, now.UTC().Format(runLayout))
 }
 
 // SetNextRun moves a task to its next run time.
@@ -282,9 +295,19 @@ func (s *Store) SetNextRun(ctx context.Context, id int64, next time.Time) error 
 	return err
 }
 
+// SetTaskPaused pauses or resumes a task and updates its next run time.
+func (s *Store) SetTaskPaused(ctx context.Context, id int64, paused bool, next time.Time) error {
+	flag := 0
+	if paused {
+		flag = 1
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET paused = ?, next_run = ? WHERE id = ?`, flag, next.UTC().Format(runLayout), id)
+	return err
+}
+
 func (s *Store) queryTasks(ctx context.Context, where string, args ...any) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, platform, chat_id, user_id, spec, prompt, summary, next_run FROM tasks `+where, args...)
+		`SELECT id, platform, chat_id, user_id, spec, prompt, summary, next_run, paused FROM tasks `+where, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -293,13 +316,15 @@ func (s *Store) queryTasks(ctx context.Context, where string, args ...any) ([]Ta
 	for rows.Next() {
 		var t Task
 		var next string
-		if err := rows.Scan(&t.ID, &t.Platform, &t.ChatID, &t.UserID, &t.Spec, &t.Prompt, &t.Summary, &next); err != nil {
+		var paused int
+		if err := rows.Scan(&t.ID, &t.Platform, &t.ChatID, &t.UserID, &t.Spec, &t.Prompt, &t.Summary, &next, &paused); err != nil {
 			return nil, err
 		}
 		t.NextRun, err = time.Parse(runLayout, next)
 		if err != nil {
 			return nil, fmt.Errorf("task %d next_run: %w", t.ID, err)
 		}
+		t.Paused = paused != 0
 		out = append(out, t)
 	}
 	return out, rows.Err()

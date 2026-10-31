@@ -213,6 +213,11 @@ func (s *Service) answer(ctx context.Context, in platform.Inbound, out platform.
 		text, err = s.command(ctx, in, cmd, arg)
 		return text, false, nil, err
 	}
+	if len(in.Images) == 0 {
+		if reply, handled, err := s.tryNaturalTask(ctx, in); handled || err != nil {
+			return reply, false, nil, err
+		}
+	}
 	images, failure := s.loadImages(ctx, in)
 	if failure != "" {
 		return failure, false, nil, nil
@@ -523,6 +528,9 @@ func sessionMissing(err error) bool {
 }
 
 func sandboxUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "could not enforce its deny list") || strings.Contains(msg, "bwrap exec failed")
 }

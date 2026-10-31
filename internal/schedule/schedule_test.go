@@ -2,6 +2,8 @@ package schedule
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +61,58 @@ func TestNextOnce(t *testing.T) {
 	}
 }
 
+func TestNextDatesFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dates.txt")
+	content := "# custom schedule\n\n20261025\r\n2026-10-20\n20261018\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := Spec{Kind: "dates", Time: "09:30", DateFile: path}
+	if err := s.Validate(at(19, 10, 0, 0), loc, time.Hour); err != nil {
+		t.Fatalf("validate failed: %v", err)
+	}
+	got, ok := s.Next(at(19, 10, 0, 0), loc)
+	if !ok || !got.Equal(at(20, 9, 30, 0)) {
+		t.Fatalf("first next got %v %v, want 2026-10-20 09:30", got, ok)
+	}
+	got, ok = s.Next(at(20, 9, 30, 0), loc)
+	if !ok || !got.Equal(at(25, 9, 30, 0)) {
+		t.Fatalf("second next got %v %v, want 2026-10-25 09:30", got, ok)
+	}
+	if _, ok := s.Next(at(25, 9, 30, 0), loc); ok {
+		t.Fatal("expected no more runs after last date in file")
+	}
+}
+
+func TestValidateDatesFileErrors(t *testing.T) {
+	dir := t.TempDir()
+	now := at(19, 10, 0, 0)
+
+	badFormat := filepath.Join(dir, "bad.txt")
+	_ = os.WriteFile(badFormat, []byte("2026/10/20\n"), 0o600)
+
+	pastOnly := filepath.Join(dir, "past.txt")
+	_ = os.WriteFile(pastOnly, []byte("20261018\n"), 0o600)
+
+	emptyFile := filepath.Join(dir, "empty.txt")
+	_ = os.WriteFile(emptyFile, []byte("# only comments\n\n"), 0o600)
+
+	cases := map[string]Spec{
+		"missing path":  {Kind: "dates", Time: "09:00"},
+		"relative path": {Kind: "dates", Time: "09:00", DateFile: "dates.txt"},
+		"not found":     {Kind: "dates", Time: "09:00", DateFile: filepath.Join(dir, "missing.txt")},
+		"bad line":      {Kind: "dates", Time: "09:00", DateFile: badFormat},
+		"past only":     {Kind: "dates", Time: "09:00", DateFile: pastOnly},
+		"empty":         {Kind: "dates", Time: "09:00", DateFile: emptyFile},
+	}
+	for name, s := range cases {
+		if err := s.Validate(now, loc, time.Hour); err == nil {
+			t.Errorf("%s: expected error for %#v", name, s)
+		}
+	}
+}
+
 func TestValidate(t *testing.T) {
 	now := at(19, 10, 0, 0)
 	bad := map[string]Spec{
@@ -107,6 +161,10 @@ func TestDecode(t *testing.T) {
 	got, err = Decode(json.RawMessage(`{"error":"没有说时间"}`), "")
 	if err != nil || got.Error != "没有说时间" {
 		t.Fatalf("%#v %v", got, err)
+	}
+	got, err = Decode(json.RawMessage(`{"kind":"daily","date_file":"/srv/dates.txt","prompt":"p","summary":"s"}`), "")
+	if err != nil || got.Kind != "dates" || got.Time != "09:00" || got.DateFile != "/srv/dates.txt" {
+		t.Fatalf("date_file decode: %#v %v", got, err)
 	}
 }
 

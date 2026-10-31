@@ -231,3 +231,149 @@ func TestTaskEmptyAnswerReportsFailure(t *testing.T) {
 		t.Fatalf("got %q, want %q", got[0], want)
 	}
 }
+
+func TestTaskNaturalLanguageSkipPauseResumeDelete(t *testing.T) {
+	ctx := context.Background()
+	svc, engine, sent := taskService(t, dailyNews)
+	id := addTask(t, svc, "9", dailyNews, "每天 09:00：看新闻", time.Date(2026, 10, 19, 9, 0, 0, 0, taskZone))
+
+	setStructured := func(raw string) {
+		engine.mu.Lock()
+		defer engine.mu.Unlock()
+		engine.replyFor = func(opts grok.ReplyOptions) (grok.HeadlessResult, error) {
+			if opts.JSONSchema != "" {
+				return grok.HeadlessResult{SessionID: opts.SessionID, Structured: json.RawMessage(raw)}, nil
+			}
+			return grok.HeadlessResult{Text: "今天的新闻", SessionID: opts.SessionID}, nil
+		}
+	}
+
+	// 1. Skip next run ("取消明天的定时任务" without specifying task_id when only 1 task exists)
+	setStructured(`{"action":"skip"}`)
+	rec := &recorder{}
+	say(svc, rec, "/task 取消下次的定时任务")
+	got := rec.wait(t, 1)
+	if !strings.Contains(got[0], "已跳过 #1") || !strings.Contains(got[0], "10-20 09:00") {
+		t.Fatalf("skip got %#v", got)
+	}
+	tasks, _ := svc.Store.Tasks(ctx, "telegram", "9")
+	if len(tasks) != 1 || !tasks[0].NextRun.Equal(time.Date(2026, 10, 20, 9, 0, 0, 0, taskZone)) {
+		t.Fatalf("after skip: %#v", tasks)
+	}
+
+	// 2. Pause task in natural language
+	setStructured(`{"action":"pause","task_id":` + strconv.FormatInt(id, 10) + `}`)
+	say(svc, rec, "/task 暂停看新闻的定时任务")
+	got = rec.wait(t, 2)
+	if !strings.Contains(got[1], "已暂停 #1") {
+		t.Fatalf("pause got %#v", got)
+	}
+	say(svc, rec, "/task list")
+	got = rec.wait(t, 3)
+	if !strings.Contains(got[2], "已暂停") {
+		t.Fatalf("list paused got %#v", got)
+	}
+
+	// Paused task must not fire even if next_run is in the past
+	_ = svc.Store.SetTaskPaused(ctx, id, true, taskNow.Add(-time.Minute))
+	svc.runDue(ctx)
+	sent.mu.Lock()
+	fired := len(sent.msgs)
+	sent.mu.Unlock()
+	if fired != 0 {
+		t.Fatalf("paused task fired: %d", fired)
+	}
+
+	// 3. Resume task in natural language
+	setStructured(`{"action":"resume","task_id":` + strconv.FormatInt(id, 10) + `}`)
+	say(svc, rec, "/task 恢复看新闻的定时任务")
+	got = rec.wait(t, 4)
+	if !strings.Contains(got[3], "已恢复 #1") || !strings.Contains(got[3], "10-19 09:00") {
+		t.Fatalf("resume got %#v", got)
+	}
+
+	// 4. Delete task in natural language
+	setStructured(`{"action":"delete","task_id":` + strconv.FormatInt(id, 10) + `}`)
+	say(svc, rec, "/task 删除看新闻的定时任务")
+	got = rec.wait(t, 5)
+	if !strings.Contains(got[4], "已删除 #1") {
+		t.Fatalf("delete got %#v", got)
+	}
+	tasks, _ = svc.Store.Tasks(ctx, "telegram", "9")
+	if len(tasks) != 0 {
+		t.Fatalf("expected 0 tasks after delete, got %#v", tasks)
+	}
+}
+
+func TestNaturalChatWithoutTaskCommand(t *testing.T) {
+	ctx := context.Background()
+	svc, engine, _ := taskService(t, dailyNews)
+
+	setStructured := func(raw string) {
+		engine.mu.Lock()
+		defer engine.mu.Unlock()
+		engine.replyFor = func(opts grok.ReplyOptions) (grok.HeadlessResult, error) {
+			if opts.JSONSchema != "" {
+				return grok.HeadlessResult{SessionID: opts.SessionID, Structured: json.RawMessage(raw)}, nil
+			}
+			return grok.HeadlessResult{Text: "普通聊天回复", SessionID: opts.SessionID}, nil
+		}
+	}
+
+	rec := &recorder{}
+	// 1. Create task without /task
+	say(svc, rec, "每天早上九点看新闻")
+	got := rec.wait(t, 1)
+	if !strings.Contains(got[0], "已创建 #1") {
+		t.Fatalf("natural create got %#v", got)
+	}
+
+	// 2. View task list without /task
+	say(svc, rec, "查看一下现在的定时任务")
+	got = rec.wait(t, 2)
+	if !strings.Contains(got[1], "#1 每天 09:00：看新闻") {
+		t.Fatalf("natural list got %#v", got)
+	}
+
+	// 3. Skip tomorrow without /task
+	setStructured(`{"action":"skip"}`)
+	say(svc, rec, "取消明天的定时任务")
+	got = rec.wait(t, 3)
+	if !strings.Contains(got[2], "已跳过 #1") || !strings.Contains(got[2], "10-20 09:00") {
+		t.Fatalf("natural skip got %#v", got)
+	}
+
+	// 4. Pause & resume without /task
+	setStructured(`{"action":"pause"}`)
+	say(svc, rec, "暂停定时任务")
+	got = rec.wait(t, 4)
+	if !strings.Contains(got[3], "已暂停 #1") {
+		t.Fatalf("natural pause got %#v", got)
+	}
+	setStructured(`{"action":"resume"}`)
+	say(svc, rec, "恢复定时任务")
+	got = rec.wait(t, 5)
+	if !strings.Contains(got[4], "已恢复 #1") {
+		t.Fatalf("natural resume got %#v", got)
+	}
+
+	// 5. Casual sentence containing "每天" that is not a schedule falls back to normal chat
+	setStructured(`{"error":"不是定时任务"}`)
+	say(svc, rec, "我每天都喝咖啡")
+	got = rec.wait(t, 6)
+	if got[5] != "普通聊天回复" {
+		t.Fatalf("fallback got %#v", got)
+	}
+
+	// 6. Delete without /task
+	setStructured(`{"action":"delete"}`)
+	say(svc, rec, "删除定时任务")
+	got = rec.wait(t, 7)
+	if !strings.Contains(got[6], "已删除 #1") {
+		t.Fatalf("natural delete got %#v", got)
+	}
+	tasks, _ := svc.Store.Tasks(ctx, "telegram", "9")
+	if len(tasks) != 0 {
+		t.Fatalf("expected 0 tasks, got %#v", tasks)
+	}
+}
