@@ -13,9 +13,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
+
+// DefaultMaxTurns is the default maximum agent turns per chat or scheduled task run.
+const DefaultMaxTurns = 50
 
 const promptBase = "You are Grok replying in a private chat. Reply in the user's language using Markdown where helpful (use single backticks for inline file or directory names and fenced code blocks for multi-line blocks). You may list and call MCP tools."
 
@@ -85,7 +89,9 @@ type Client struct {
 	BillingURL string
 	UserURL    string
 	Timeout    time.Duration
-	HTTP       *http.Client
+	// MaxTurns caps agent turns per chat run; 0 means DefaultMaxTurns, < 0 means unlimited.
+	MaxTurns int
+	HTTP     *http.Client
 	// InboxDir holds the temporary prompt files of turns that carry images.
 	InboxDir string
 }
@@ -125,6 +131,8 @@ type ReplyOptions struct {
 	SendFile bool
 	// Images are sent together with Prompt; chat turns only.
 	Images []Image
+	// MaxTurns overrides Client.MaxTurns when non-zero (< 0 omits --max-turns).
+	MaxTurns int
 }
 
 func (c *Client) Reply(ctx context.Context, opts ReplyOptions) (HeadlessResult, error) {
@@ -136,7 +144,7 @@ func (c *Client) Reply(ctx context.Context, opts ReplyOptions) (HeadlessResult, 
 	}
 	timeout := c.Timeout
 	if timeout <= 0 {
-		timeout = 4 * time.Minute
+		timeout = 10 * time.Minute
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -197,7 +205,14 @@ func replyStream(ctx context.Context, cmd *exec.Cmd, opts ReplyOptions) (Headles
 		}
 		var reported *RunError
 		if errors.As(parseErr, &reported) {
-			return HeadlessResult{}, parseErr
+			if result.SessionID == "" {
+				if reported.SessionID != "" {
+					result.SessionID = reported.SessionID
+				} else {
+					result.SessionID = opts.SessionID
+				}
+			}
+			return result, parseErr
 		}
 		return HeadlessResult{}, headlessFailure(plain.String(), stderr.String(), parseErr, runErr)
 	}
@@ -210,6 +225,9 @@ func replyStream(ctx context.Context, cmd *exec.Cmd, opts ReplyOptions) (Headles
 // buildArgs builds the command line for one turn. With images the prompt goes through a temporary
 // file in InboxDir (a command line cannot hold them); cleanup removes that file and is always safe to call.
 func (c *Client) buildArgs(opts ReplyOptions) (args []string, cleanup func(), err error) {
+	if opts.MaxTurns == 0 {
+		opts.MaxTurns = c.MaxTurns
+	}
 	if len(opts.Images) == 0 {
 		return replyArgs(c.Workspace, opts), func() {}, nil
 	}
@@ -266,20 +284,27 @@ func replyArgs(workspace string, opts ReplyOptions) []string {
 
 // replyArgsFile is replyArgs with the prompt read from promptFile when that is set.
 func replyArgsFile(workspace string, opts ReplyOptions, promptFile string) []string {
-	maxTurns := "8"
+	turns := opts.MaxTurns
+	if turns == 0 {
+		turns = DefaultMaxTurns
+	}
 	format := "streaming-messages-json"
 	if opts.JSONSchema != "" {
-		maxTurns = "2"
+		turns = 2
 		format = "json"
 	}
 	args := []string{
 		"--cwd", workspace,
 		"-m", opts.Model,
 		"--output-format", format,
-		"--max-turns", maxTurns,
+	}
+	if turns > 0 {
+		args = append(args, "--max-turns", strconv.Itoa(turns))
+	}
+	args = append(args,
 		"--no-plan",
 		"--no-subagents",
-	}
+	)
 	if promptFile != "" {
 		args = append(args, "--prompt-file", promptFile)
 	} else {
@@ -521,6 +546,8 @@ var botEnvKeys = map[string]bool{
 	"DATA_DIR":                 true,
 	"DEFAULT_MODEL":            true,
 	"WEB_SEARCH":               true,
+	"ALLOW_SHELL":              true,
+	"GROK_MAX_TURNS":           true,
 	"BOT_ENV_FILE":             true,
 	"TIMEZONE":                 true,
 	"QUEUE_LIMIT":              true,

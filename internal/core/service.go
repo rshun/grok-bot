@@ -405,6 +405,11 @@ func (s *Service) chatTurn(ctx context.Context, in platform.Inbound, out platfor
 		return res, nil
 	}
 	if err != nil {
+		if grok.IsMaxTurns(err) {
+			_ = s.Store.SetSession(ctx, in.Platform, in.ChatID, res.sessionID)
+			res.text = grok.UserFacing(err)
+			return res.chatResult, nil
+		}
 		return chatResult{}, err
 	}
 	if err := s.Store.SetSession(ctx, in.Platform, in.ChatID, res.sessionID); err != nil {
@@ -429,6 +434,11 @@ func (s *Service) startSession(ctx context.Context, in platform.Inbound, out pla
 		res, err = s.reply(ctx, in, out, opts)
 	}
 	if err != nil {
+		if grok.IsMaxTurns(err) {
+			_ = s.Store.StartSession(ctx, in.Platform, in.ChatID, res.sessionID, profile)
+			res.text = grok.UserFacing(err)
+			return res.chatResult, nil
+		}
 		return chatResult{}, err
 	}
 	if err := s.Store.StartSession(ctx, in.Platform, in.ChatID, res.sessionID, profile); err != nil {
@@ -450,13 +460,17 @@ func (s *Service) reply(ctx context.Context, in platform.Inbound, out platform.R
 	turn, env, end := s.beginTurn(in, out, opts.FileTools || opts.ShellTools)
 	defer end()
 	result, err := s.Engine.Reply(ctx, withTurn(opts, turn, env))
-	if err != nil {
-		return replyResult{}, err
+	sessionID := result.SessionID
+	if sessionID == "" {
+		sessionID = opts.SessionID
 	}
-	res := replyResult{chatResult: chatResult{text: result.Text}, sessionID: result.SessionID}
+	res := replyResult{chatResult: chatResult{text: result.Text}, sessionID: sessionID}
 	if turn != nil {
 		res.reacted = turn.Reacted()
 		res.files = turn.Files()
+	}
+	if err != nil {
+		return res, err
 	}
 	return res, nil
 }

@@ -29,6 +29,7 @@ type Config struct {
 	BillingURL    string
 	UserURL       string
 	GrokTimeout   time.Duration
+	GrokMaxTurns  int
 	QueueLimit    int
 	WebSearch     bool
 	AllowShell    bool
@@ -70,11 +71,23 @@ func Load() (Config, error) {
 	if dataDir == "" {
 		dataDir = "data"
 	}
-	timeout := 4 * time.Minute
+	timeout := 10 * time.Minute
 	if raw := strings.TrimSpace(os.Getenv("GROK_TIMEOUT")); raw != "" {
 		timeout, err = time.ParseDuration(raw)
 		if err != nil {
 			return Config{}, fmt.Errorf("GROK_TIMEOUT: %w", err)
+		}
+	}
+	maxTurns := 50
+	if raw := strings.TrimSpace(os.Getenv("GROK_MAX_TURNS")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			return Config{}, fmt.Errorf("GROK_MAX_TURNS must be a non-negative integer")
+		}
+		if n == 0 {
+			maxTurns = -1
+		} else {
+			maxTurns = n
 		}
 	}
 	queueLimit := 8
@@ -155,6 +168,7 @@ func Load() (Config, error) {
 		BillingURL:      billing,
 		UserURL:         userURL,
 		GrokTimeout:     timeout,
+		GrokMaxTurns:    maxTurns,
 		QueueLimit:      queueLimit,
 		WebSearch:       webSearch,
 		AllowShell:      allowShell,

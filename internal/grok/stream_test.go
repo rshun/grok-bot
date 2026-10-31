@@ -168,3 +168,23 @@ func TestParseStreamOverlongLineWithoutNewlineAtEOF(t *testing.T) {
 		t.Fatalf("got %+v, %v", res, err)
 	}
 }
+
+func TestParseStreamMaxTurnsKeepsPartialTextAndSession(t *testing.T) {
+	stream := strings.Join([]string{
+		streamInit,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"已完成前两步检查，发现 3 个异常日志。"},{"type":"tool_use","name":"read_file","input":{"path":"/var/log/app.log"}}]}}`,
+		`{"type":"result","subtype":"error_max_turns","is_error":true,"errors":["Reached the maximum number of turns"],"session_id":"sess-42"}`,
+	}, "\n") + "\n"
+
+	res, err := ParseStream(strings.NewReader(stream), nil)
+	if !IsMaxTurns(err) {
+		t.Fatalf("expected IsMaxTurns=true, got %v", err)
+	}
+	if res.SessionID != "sess-42" {
+		t.Fatalf("session id: %q", res.SessionID)
+	}
+	facing := UserFacing(err)
+	if !strings.Contains(facing, "已完成前两步检查") || !strings.Contains(facing, "继续") {
+		t.Fatalf("unexpected user facing text: %q", facing)
+	}
+}

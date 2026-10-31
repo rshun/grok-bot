@@ -184,8 +184,17 @@ func TestReplyArgsFiles(t *testing.T) {
 
 func TestReplyArgsStreaming(t *testing.T) {
 	base := ReplyOptions{SessionID: "sess", NewSession: true, Model: "grok-4.7", Prompt: "hi"}
-	if got := argValue(t, replyArgs("/ws", base), "--output-format"); got != "streaming-messages-json" {
+	args := replyArgs("/ws", base)
+	if got := argValue(t, args, "--output-format"); got != "streaming-messages-json" {
 		t.Fatalf("chat output format: %q", got)
+	}
+	if got := argValue(t, args, "--max-turns"); got != "50" {
+		t.Fatalf("default max turns: %q", got)
+	}
+	unlimited := base
+	unlimited.MaxTurns = -1
+	if hasArg(replyArgs("/ws", unlimited), "--max-turns") {
+		t.Fatalf("unlimited turns should omit --max-turns: %q", replyArgs("/ws", unlimited))
 	}
 	base.JSONSchema = `{"type":"object"}`
 	if got := argValue(t, replyArgs("/ws", base), "--output-format"); got != "json" {
