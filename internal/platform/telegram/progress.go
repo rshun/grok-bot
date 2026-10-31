@@ -74,9 +74,18 @@ func (p *progressMessage) edit(text string) error {
 	_, err := p.bot.api.MakeRequest("editMessageText", tgbotapi.Params{
 		"chat_id":                  p.chatID,
 		"message_id":               strconv.Itoa(p.messageID),
-		"text":                     text,
+		"text":                     formatHTML(text),
+		"parse_mode":               "HTML",
 		"disable_web_page_preview": "true",
 	})
+	if err != nil && strings.Contains(err.Error(), "can't parse entities") {
+		_, err = p.bot.api.MakeRequest("editMessageText", tgbotapi.Params{
+			"chat_id":                  p.chatID,
+			"message_id":               strconv.Itoa(p.messageID),
+			"text":                     text,
+			"disable_web_page_preview": "true",
+		})
+	}
 	if err != nil && strings.Contains(err.Error(), "message is not modified") {
 		return nil
 	}
@@ -99,13 +108,19 @@ func (b *Bot) sendOne(chatID, text string, replyTo int) (int, error) {
 	}
 	params := tgbotapi.Params{
 		"chat_id":                  strconv.FormatInt(id, 10),
-		"text":                     text,
+		"text":                     formatHTML(text),
+		"parse_mode":               "HTML",
 		"disable_web_page_preview": "true",
 	}
 	if replyTo > 0 {
 		params["reply_parameters"] = fmt.Sprintf(`{"message_id":%d,"allow_sending_without_reply":true}`, replyTo)
 	}
 	resp, err := b.api.MakeRequest("sendMessage", params)
+	if err != nil && strings.Contains(err.Error(), "can't parse entities") {
+		delete(params, "parse_mode")
+		params["text"] = text
+		resp, err = b.api.MakeRequest("sendMessage", params)
+	}
 	if err != nil {
 		return 0, err
 	}
