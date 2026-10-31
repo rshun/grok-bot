@@ -537,3 +537,25 @@ func TestAllowanceMultipleTokensAndRefreshOn401(t *testing.T) {
 		t.Fatalf("after 401 auto-refresh: got %+v, err %v", got, err)
 	}
 }
+
+func TestReplyArgsMemoriesInSystemPrompt(t *testing.T) {
+	opts := ReplyOptions{
+		SessionID:  "sess",
+		NewSession: true,
+		Model:      "grok-4.7",
+		Prompt:     "你好",
+		Memories:   []string{"每次应答前面都要加上xxx", "用简体中文回答"},
+	}
+	args := replyArgs("/ws", opts)
+	sys := argValue(t, args, "--system-prompt-override")
+	if !strings.Contains(sys, "- 每次应答前面都要加上xxx") || !strings.Contains(sys, "- 用简体中文回答") {
+		t.Fatalf("system prompt missing memories: %s", sys)
+	}
+	// JSONSchema calls must NOT include chat memories.
+	schemaOpts := opts
+	schemaOpts.JSONSchema = `{"type":"object"}`
+	schemaSys := argValue(t, replyArgs("/ws", schemaOpts), "--system-prompt-override")
+	if strings.Contains(schemaSys, "每次应答") {
+		t.Fatalf("schema prompt should not include chat memories: %s", schemaSys)
+	}
+}

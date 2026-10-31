@@ -1,6 +1,9 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -132,5 +135,38 @@ func TestLoadTaskSettings(t *testing.T) {
 	t.Setenv("GROK_MAX_TURNS", "0")
 	if cfg, err = Load(); err != nil || cfg.GrokMaxTurns != -1 {
 		t.Fatalf("GROK_MAX_TURNS=0: %d %v", cfg.GrokMaxTurns, err)
+	}
+}
+
+func TestLoadUserProfile(t *testing.T) {
+	home := t.TempDir()
+	profile := strings.Join([]string{
+		`# user profile`,
+		`export THESEUS_API_KEY="secret-theseus"`,
+		`export RAG_MCP_TOKEN='secret$literal'`,
+		`UNEXPORTED_MCP_KEY=plain_val # inline comment`,
+		`export EXISTING_BOT_VAR="from_profile"`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(home, ".bash_profile"), []byte(profile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("THESEUS_API_KEY", "")
+	t.Setenv("RAG_MCP_TOKEN", "")
+	t.Setenv("UNEXPORTED_MCP_KEY", "")
+	t.Setenv("EXISTING_BOT_VAR", "from_systemd")
+
+	LoadUserProfile(home)
+
+	if got := os.Getenv("THESEUS_API_KEY"); got != "secret-theseus" {
+		t.Fatalf("THESEUS_API_KEY = %q", got)
+	}
+	if got := os.Getenv("RAG_MCP_TOKEN"); got != "secret$literal" {
+		t.Fatalf("RAG_MCP_TOKEN = %q", got)
+	}
+	if got := os.Getenv("UNEXPORTED_MCP_KEY"); got != "plain_val" {
+		t.Fatalf("UNEXPORTED_MCP_KEY = %q", got)
+	}
+	if got := os.Getenv("EXISTING_BOT_VAR"); got != "from_systemd" {
+		t.Fatalf("EXISTING_BOT_VAR overwritten: %q", got)
 	}
 }

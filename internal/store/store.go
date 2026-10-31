@@ -38,6 +38,12 @@ type Task struct {
 	Paused   bool
 }
 
+// Memory is one persistent user instruction or fact scoped to a chat.
+type Memory struct {
+	ID      int64
+	Content string
+}
+
 // runLayout is fixed-width UTC so next_run compares correctly as text.
 const runLayout = "2006-01-02T15:04:05Z"
 
@@ -115,6 +121,14 @@ func (s *Store) migrate() error {
 			created_at TEXT NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS tasks_next_run ON tasks (next_run);
+		CREATE TABLE IF NOT EXISTS memories (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			platform TEXT NOT NULL,
+			chat_id TEXT NOT NULL,
+			content TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS memories_chat ON memories (platform, chat_id, id);
 	`)
 	if err != nil {
 		return err
@@ -350,6 +364,84 @@ func (s *Store) PutSetting(ctx context.Context, key, value string) error {
 		`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
 		key, value)
 	return err
+}
+
+// AddMemory stores a persistent memory for one chat if not already present, returning its ID and whether it was newly added.
+func (s *Store) AddMemory(ctx context.Context, platform, chatID, content string) (int64, bool, error) {
+	var existingID int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id FROM memories WHERE platform = ? AND chat_id = ? AND content = ? ORDER BY id LIMIT 1`,
+		platform, chatID, content,
+	).Scan(&existingID)
+	if err == nil {
+		return existingID, false, nil
+	}
+	if err != sql.ErrNoRows {
+		return 0, false, err
+	}
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO memories (platform, chat_id, content, created_at)
+		VALUES (?, ?, ?, ?)
+	`, platform, chatID, content, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, false, fmt.Errorf("save memory: %w", err)
+	}
+	id, err := res.LastInsertId()
+	return id, true, err
+}
+
+// Memories returns one chat's persistent memories ordered by ID.
+func (s *Store) Memories(ctx context.Context, platform, chatID string) ([]Memory, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, content FROM memories WHERE platform = ? AND chat_id = ? ORDER BY id`,
+		platform, chatID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Memory
+	for rows.Next() {
+		var m Memory
+		if err := rows.Scan(&m.ID, &m.Content); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// DeleteMemory deletes a single memory belonging to the given chat and returns its content if found.
+func (s *Store) DeleteMemory(ctx context.Context, platform, chatID string, id int64) (string, bool, error) {
+	var content string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT content FROM memories WHERE id = ? AND platform = ? AND chat_id = ?`,
+		id, platform, chatID,
+	).Scan(&content)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM memories WHERE id = ? AND platform = ? AND chat_id = ?`,
+		id, platform, chatID,
+	)
+	if err != nil {
+		return "", false, err
+	}
+	n, err := res.RowsAffected()
+	return content, n > 0, err
+}
+
+// ClearMemories deletes all persistent memories for one chat and returns the count removed.
+func (s *Store) ClearMemories(ctx context.Context, platform, chatID string) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM memories WHERE platform = ? AND chat_id = ?`, platform, chatID)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func (s *Store) queryTasks(ctx context.Context, where string, args ...any) ([]Task, error) {
