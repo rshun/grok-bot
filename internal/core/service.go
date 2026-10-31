@@ -222,7 +222,7 @@ func (s *Service) dispatch(it item) {
 // answered by a reaction alone, so an empty text is not a failure.
 func (s *Service) answer(ctx context.Context, in platform.Inbound, out platform.Replier, onTool func(grok.ToolUse)) (text string, quiet bool, files []actions.File, err error) {
 	if cmd, arg, ok := parseInboundCommand(in); ok {
-		text, files, err = s.command(ctx, in, out, cmd, arg)
+		text, files, err = s.command(ctx, in, out, cmd, arg, onTool)
 		return text, false, files, err
 	}
 	uploaded, fileFailure := s.saveUploads(ctx, in)
@@ -234,7 +234,7 @@ func (s *Service) answer(ctx context.Context, in platform.Inbound, out platform.
 		if len(uploaded) > 0 {
 			taskIn.Text = formatUploadedFilesPrompt(in.Text, uploaded, false)
 		}
-		if reply, taskFiles, handled, err := s.tryNaturalTask(ctx, taskIn, out); handled || err != nil {
+		if reply, taskFiles, handled, err := s.tryNaturalTask(ctx, taskIn, out, onTool); handled || err != nil {
 			return reply, false, taskFiles, err
 		}
 	}
@@ -245,7 +245,7 @@ func (s *Service) answer(ctx context.Context, in platform.Inbound, out platform.
 	return s.chat(ctx, in, out, images, uploaded, onTool)
 }
 
-func (s *Service) command(ctx context.Context, in platform.Inbound, out platform.Replier, cmd, arg string) (string, []actions.File, error) {
+func (s *Service) command(ctx context.Context, in platform.Inbound, out platform.Replier, cmd, arg string, onTool func(grok.ToolUse)) (string, []actions.File, error) {
 	switch cmd {
 	case "/start", "/help":
 		return helpText(s.Version), nil, nil
@@ -269,7 +269,7 @@ func (s *Service) command(ctx context.Context, in platform.Inbound, out platform
 		text, err := s.shellCommand(ctx, arg)
 		return text, nil, err
 	case "/task":
-		return s.taskCommand(ctx, in, out, arg)
+		return s.taskCommand(ctx, in, out, arg, onTool)
 	case "/reset":
 		if err := s.Store.ClearSession(ctx, in.Platform, in.ChatID); err != nil {
 			return "", nil, err
@@ -371,6 +371,7 @@ func (s *Service) chatTurn(ctx context.Context, in platform.Inbound, out platfor
 	if len(uploaded) > 0 {
 		prompt = formatUploadedFilesPrompt(prompt, uploaded, true)
 	}
+	prompt = s.withChatTasksContext(ctx, in, prompt)
 	prompt = withReplyQuote(prompt, in.ReplyToText)
 
 	// The images stay in base so a rebuilt session gets them again.
@@ -583,6 +584,28 @@ func sandboxUnavailable(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "could not enforce its deny list") || strings.Contains(msg, "bwrap exec failed")
+}
+
+func (s *Service) withChatTasksContext(ctx context.Context, in platform.Inbound, prompt string) string {
+	if !strings.Contains(in.Text, "任务") {
+		return prompt
+	}
+	tasks, err := s.Store.Tasks(ctx, in.Platform, in.ChatID)
+	if err != nil || len(tasks) == 0 {
+		return prompt
+	}
+	var b strings.Builder
+	b.WriteString("[当前聊天的定时任务列表]\n")
+	for _, t := range tasks {
+		status := fmt.Sprintf("下次 %s", t.NextRun.In(s.location()).Format("01-02 15:04"))
+		if t.Paused {
+			status = "已暂停"
+		}
+		fmt.Fprintf(&b, "#%d %s（指令：%s；状态：%s）\n", t.ID, t.Summary, t.Prompt, status)
+	}
+	b.WriteString("[列表结束]\n\n")
+	b.WriteString(prompt)
+	return b.String()
 }
 
 func withReplyQuote(prompt, quote string) string {
