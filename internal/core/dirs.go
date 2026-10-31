@@ -40,7 +40,7 @@ func (s *Service) dirCommand(ctx context.Context, in platform.Inbound, arg strin
 			return err.Error(), nil
 		}
 		reply := fmt.Sprintf("已添加 %s（可读写）。", path)
-		if ready, _, reason := s.fileAccess(ctx); !ready {
+		if ready, _, _, reason := s.fileAccess(ctx); !ready {
 			reply += "\n文件功能当前不可用：" + reason
 		}
 		return reply, nil
@@ -74,7 +74,7 @@ func (s *Service) dirList(ctx context.Context, in platform.Inbound) (string, err
 			fmt.Fprintf(&b, "- %s\n", path)
 		}
 	}
-	ready, _, reason := s.fileAccess(ctx)
+	ready, _, _, reason := s.fileAccess(ctx)
 	if !ready {
 		b.WriteString("\n文件功能当前不可用：" + reason)
 	}
@@ -107,7 +107,7 @@ func (s *Service) applyGrants(ctx context.Context, text string) []string {
 		notes = append(notes, "已允许写入 "+path+"。")
 	}
 	if len(grant) > 0 {
-		if ready, _, reason := s.fileAccess(ctx); !ready {
+		if ready, _, _, reason := s.fileAccess(ctx); !ready {
 			notes = append(notes, "文件功能当前不可用："+reason)
 		}
 	}
@@ -165,43 +165,47 @@ func (s *Service) writeDirs(ctx context.Context) ([]string, error) {
 	return rw, nil
 }
 
-// fileAccess syncs the sandbox profile and reports whether file tools can be offered.
-// reason explains to the chat user why they cannot.
-func (s *Service) fileAccess(ctx context.Context) (ready bool, rw []string, reason string) {
+// fileAccess syncs the sandbox profile and reports whether file tools can be offered,
+// the sandbox profile to pass to grok (empty when bubblewrap is missing), and the writable dirs.
+// reason explains to the chat user why file tools cannot be offered.
+func (s *Service) fileAccess(ctx context.Context) (ready bool, profile string, rw []string, reason string) {
 	if s.Sandbox == nil {
-		return false, nil, "没有配置沙箱。"
+		return false, "", nil, "没有配置沙箱。"
 	}
 	if !s.Sandbox.Enabled {
-		return false, nil, "这台机器的系统不支持 grok 沙箱（只支持 Linux 和 macOS）。"
+		return false, "", nil, "这台机器的系统不支持 grok 沙箱（只支持 Linux 和 macOS）。"
 	}
 	rw, err := s.writeDirs(ctx)
 	if err != nil {
 		slog.Error("load dirs", "err", err)
-		return false, nil, "读取目录名单失败。"
+		return false, "", nil, "读取目录名单失败。"
 	}
+	profile = sandbox.ProfileName
 	if err := s.Sandbox.Sync(rw); err != nil {
 		if errors.Is(err, sandbox.ErrUnmanaged) {
 			slog.Error("sandbox profile is not managed by the bot", "path", s.Sandbox.Path)
-			return false, nil, s.Sandbox.Path + " 不是 bot 生成的，请管理员手动合并 grokbot 配置。"
+			return false, "", nil, s.Sandbox.Path + " 不是 bot 生成的，请管理员手动合并 grokbot 配置。"
 		}
 		if !errors.Is(err, sandbox.ErrDenyUnavailable) {
 			slog.Error("write sandbox profile", "err", err)
-			return false, nil, "写入沙箱配置失败。"
+			return false, "", nil, "写入沙箱配置失败。"
 		}
-		// Without bubblewrap the profile was still written without the read-deny list;
-		// Landlock still restricts writes and file tools remain enabled.
+		// On Linux, grok adds runtime sockets (/run/systemd/private, etc.) to every custom
+		// profile's deny list and refuses to start without bwrap. Run unsandboxed while
+		// keeping file tools and send_file's own deny checks enabled.
+		profile = ""
 	}
-	return true, rw, ""
+	return true, profile, rw, ""
 }
 
 // newSessionOptions fills the sandbox fields for a brand-new session and returns the profile to record.
 func (s *Service) newSessionOptions(ctx context.Context, opts *grok.ReplyOptions) string {
-	ready, rw, _ := s.fileAccess(ctx)
+	ready, profile, rw, _ := s.fileAccess(ctx)
 	if !ready {
 		return ""
 	}
-	opts.Sandbox = sandbox.ProfileName
+	opts.Sandbox = profile
 	opts.FileTools = true
 	opts.WriteDirs = rw
-	return sandbox.ProfileName
+	return profile
 }

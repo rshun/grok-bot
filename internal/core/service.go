@@ -344,13 +344,21 @@ func (s *Service) chatTurn(ctx context.Context, in platform.Inbound, out platfor
 	}
 	opts := base
 	opts.SessionID = chat.SessionID
-	// A resumed session keeps the sandbox it was created with; grok refuses a different one.
+	// A resumed session keeps the sandbox it was created with; when bubblewrap is missing on Linux
+	// grok refuses any custom sandbox profile, so run unsandboxed instead.
 	opts.Sandbox = chat.Sandbox
-	if ready, rw, _ := s.fileAccess(ctx); ready {
+	if ready, profile, rw, _ := s.fileAccess(ctx); ready {
+		if profile == "" {
+			opts.Sandbox = ""
+		}
 		opts.FileTools = true
 		opts.WriteDirs = rw
 	}
 	res, err := s.reply(ctx, in, out, opts)
+	if err != nil && opts.Sandbox != "" && sandboxUnavailable(err) {
+		opts.Sandbox = ""
+		res, err = s.reply(ctx, in, out, opts)
+	}
 	if err != nil && sessionMissing(err) {
 		res, err := s.startSession(ctx, in, out, base)
 		if err != nil {
@@ -378,6 +386,11 @@ func (s *Service) startSession(ctx context.Context, in platform.Inbound, out pla
 	opts.NewSession = true
 	profile := s.newSessionOptions(ctx, &opts)
 	res, err := s.reply(ctx, in, out, opts)
+	if err != nil && opts.Sandbox != "" && sandboxUnavailable(err) {
+		opts.Sandbox = ""
+		profile = ""
+		res, err = s.reply(ctx, in, out, opts)
+	}
 	if err != nil {
 		return chatResult{}, err
 	}
@@ -507,6 +520,11 @@ func sessionMissing(err error) bool {
 		strings.Contains(msg, "no such") ||
 		strings.Contains(msg, "couldn't start") ||
 		strings.Contains(msg, "could not"))
+}
+
+func sandboxUnavailable(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "could not enforce its deny list") || strings.Contains(msg, "bwrap exec failed")
 }
 
 func newUUID() (string, error) {

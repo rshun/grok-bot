@@ -302,10 +302,10 @@ func TestNoBwrapStillEnablesFileTools(t *testing.T) {
 	engine.mu.Lock()
 	call := engine.calls[0]
 	engine.mu.Unlock()
-	if call.Sandbox != sandbox.ProfileName || !call.FileTools {
+	if call.Sandbox != "" || !call.FileTools {
 		t.Fatalf("%#v", call)
 	}
-	if chat, _ := svc.Store.Chat(context.Background(), "telegram", "9"); chat.Sandbox != sandbox.ProfileName {
+	if chat, _ := svc.Store.Chat(context.Background(), "telegram", "9"); chat.Sandbox != "" {
 		t.Fatalf("%#v", chat)
 	}
 }
@@ -322,7 +322,7 @@ func TestNoBwrapResumedSandboxSessionKeepsFileTools(t *testing.T) {
 	engine.mu.Lock()
 	call := engine.calls[0]
 	engine.mu.Unlock()
-	if call.NewSession || call.SessionID != "s1" || call.Sandbox != sandbox.ProfileName || !call.FileTools {
+	if call.NewSession || call.SessionID != "s1" || call.Sandbox != "" || !call.FileTools {
 		t.Fatalf("%#v", call)
 	}
 }

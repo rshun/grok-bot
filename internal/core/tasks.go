@@ -269,8 +269,8 @@ func (s *Service) runTask(ctx context.Context, in platform.Inbound, out platform
 		Prompt:     t.Prompt,
 		WebSearch:  s.WebSearch,
 	}
-	profile := s.newSessionOptions(ctx, &opts)
-	turn, env, end := s.beginTurn(in, out, profile != "")
+	_ = s.newSessionOptions(ctx, &opts)
+	turn, env, end := s.beginTurn(in, out, opts.FileTools)
 	defer end()
 	opts = withTurn(opts, turn, env)
 	result, err := s.Engine.Reply(ctx, opts)
