@@ -19,11 +19,15 @@ import (
 
 const taskUsage = `用法：
 /task 每天早上九点总结科技新闻
-    用一句话创建定时任务
+    用一句话创建定时任务（支持每天/每周/每月/月末最后一天/工作日）
+/task cron 30 9 1 * * 汇总上月账单
+    直接用标准 5 段 Cron 表达式创建定时任务
 /task 取消明天的定时任务 / 暂停定时任务 / 恢复定时任务
     用自然语言跳过下次、暂停、恢复或删除定时任务
 /task list
     查看这个聊天的定时任务
+/task run 编号
+    立即试跑一次定时任务
 /task del 编号
     删除定时任务`
 
@@ -96,6 +100,11 @@ func (s *Service) taskCommand(ctx context.Context, in platform.Inbound, out plat
 		return fmt.Sprintf("已删除 #%d。", id), nil, nil
 	case fields[0] == "del" && len(fields) == 1:
 		return taskUsage, nil, nil
+	case fields[0] == "cron" && len(fields) >= 7:
+		reply, err := s.taskCreateRawCron(ctx, in, fields[1:6], strings.Join(fields[6:], " "))
+		return reply, nil, err
+	case fields[0] == "cron":
+		return "用法：`/task cron <分> <时> <日> <月> <周> <指令内容>`（例如：`/task cron 30 9 1 * * 汇总上月账单`）", nil, nil
 	default:
 		reply, files, err := s.taskCreateWithProgress(ctx, in, out, arg, onTool)
 		if errors.Is(err, errNotTask) {
@@ -411,7 +420,7 @@ func looksLikeNaturalTask(text string, existing []store.Task) bool {
 	if mentionsTaskExplicitly(text) {
 		return true
 	}
-	for _, kw := range []string{"每天", "每日", "每周", "每个工作日", "每隔", "每小时", "提醒我"} {
+	for _, kw := range []string{"每天", "每日", "每周", "每月", "每个月", "月初", "月底", "每个工作日", "工作日", "每隔", "每小时", "整点", "提醒我"} {
 		if strings.Contains(text, kw) {
 			return true
 		}
@@ -571,16 +580,18 @@ func (s *Service) runDue(ctx context.Context) {
 			continue
 		}
 		ln := s.lane(t.Platform, t.ChatID)
-		if _, ok := ln.reserve(s.limit()); !ok {
+		_, epoch, ok := ln.reserve(s.limit())
+		if !ok {
 			slog.Warn("chat queue full, skipped task run", "task", t.ID)
 			continue
 		}
 		task := t
 		ln.enqueue(item{
-			ctx:  ctx,
-			in:   platform.Inbound{Platform: t.Platform, ChatID: t.ChatID, UserID: t.UserID, Text: t.Prompt, TextMessage: true},
-			out:  out,
-			task: &task,
+			ctx:   ctx,
+			in:    platform.Inbound{Platform: t.Platform, ChatID: t.ChatID, UserID: t.UserID, Text: t.Prompt, TextMessage: true},
+			out:   out,
+			epoch: epoch,
+			task:  &task,
 		})
 	}
 }
@@ -644,4 +655,47 @@ func taskNext(t store.Task, now time.Time, loc *time.Location) (time.Time, bool)
 		return time.Time{}, false
 	}
 	return spec.Next(now, loc)
+}
+
+func (s *Service) taskCreateRawCron(ctx context.Context, in platform.Inbound, cronFields []string, prompt string) (string, error) {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return "用法：`/task cron <分> <时> <日> <月> <周> <指令内容>`", nil
+	}
+	existing, err := s.Store.Tasks(ctx, in.Platform, in.ChatID)
+	if err != nil {
+		return "", err
+	}
+	if len(existing) >= s.taskLimit() {
+		return fmt.Sprintf("这个聊天最多 %d 个定时任务，先用 /task del 删掉一些。", s.taskLimit()), nil
+	}
+	expr := strings.Join(cronFields, " ")
+	specObj := schedule.Spec{Kind: "cron", Cron: expr}
+	now := s.now()
+	if err := specObj.Validate(now, s.location(), s.minInterval()); err != nil {
+		return notUnderstood + "（" + err.Error() + "）", nil
+	}
+	next, ok := specObj.Next(now, s.location())
+	if !ok {
+		return notUnderstood + "（Cron 表达式没有未来的执行时间）", nil
+	}
+	rawSpec, err := json.Marshal(specObj)
+	if err != nil {
+		return "", err
+	}
+	summary := fmt.Sprintf("Cron (%s)：%s", expr, summarizeSessionTitle(prompt))
+	id, err := s.Store.AddTask(ctx, store.Task{
+		Platform: in.Platform,
+		ChatID:   in.ChatID,
+		UserID:   in.UserID,
+		Spec:     string(rawSpec),
+		Prompt:   prompt,
+		Summary:  summary,
+		NextRun:  next,
+	})
+	if err != nil {
+		return "", err
+	}
+	s.syncCrontab(ctx)
+	return fmt.Sprintf("已创建 #%d：%s。下次执行：%s。", id, summary, next.In(s.location()).Format("01-02 15:04")), nil
 }

@@ -40,6 +40,7 @@ func main() {
 	}
 	cfg.Version = version
 	isTaskRun := len(os.Args) == 3 && os.Args[1] == "run-task"
+	isPushRun := len(os.Args) >= 2 && (os.Args[1] == "send" || os.Args[1] == "notify")
 	workspaceName := "workspace"
 	if isTaskRun {
 		// Isolated workspace so one-shot cron runs do not overwrite the daemon's MCP port config.
@@ -86,6 +87,14 @@ func main() {
 			EnvFile:  cfg.EnvFile,
 			AuthPath: cfg.AuthPath,
 		},
+	}
+	if isPushRun {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		if err := runPushCommand(ctx, cfg, db, sandboxManager.Policy, os.Args[2:]); err != nil {
+			os.Exit(1)
+		}
+		return
 	}
 	engine := &grok.Client{
 		Bin:        cfg.GrokBin,

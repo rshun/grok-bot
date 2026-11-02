@@ -227,6 +227,47 @@ func TestMemoriesSurviveClearSessionAndStayScoped(t *testing.T) {
 	}
 }
 
+func TestSavedSessionsRoundTripAndSwitch(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	id1, err := s.SaveSessionHistory(ctx, "telegram", "1", "sess-a", "排查MCP问题", "grok-4.7", "grokbot", false)
+	if err != nil || id1 == 0 {
+		t.Fatalf("save 1: %d %v", id1, err)
+	}
+	// Updating without overwriteTitle preserves original title.
+	id1Again, err := s.SaveSessionHistory(ctx, "telegram", "1", "sess-a", "后续提问", "grok-4.7", "grokbot", false)
+	if err != nil || id1Again != id1 {
+		t.Fatalf("save 1 again: %d %v", id1Again, err)
+	}
+	id2, err := s.SaveSessionHistory(ctx, "telegram", "1", "sess-b", "量化报表检查", "grok-4.6", "", false)
+	if err != nil || id2 == 0 {
+		t.Fatalf("save 2: %d %v", id2, err)
+	}
+	list, err := s.Sessions(ctx, "telegram", "1")
+	if err != nil || len(list) != 2 {
+		t.Fatalf("list: %#v %v", list, err)
+	}
+	got1, ok, err := s.SessionByID(ctx, "telegram", "1", id1)
+	if err != nil || !ok || got1.Title != "排查MCP问题" {
+		t.Fatalf("by id: %#v %v %v", got1, ok, err)
+	}
+	if err := s.ActivateSession(ctx, "telegram", "1", got1); err != nil {
+		t.Fatal(err)
+	}
+	chat, err := s.Chat(ctx, "telegram", "1")
+	if err != nil || chat.SessionID != "sess-a" || chat.Sandbox != "grokbot" {
+		t.Fatalf("activated chat: %#v %v", chat, err)
+	}
+	known, err := s.KnownChats(ctx, "telegram")
+	if err != nil || len(known) != 1 || known[0] != "1" {
+		t.Fatalf("known chats: %#v %v", known, err)
+	}
+	delSess, ok, err := s.DeleteSavedSession(ctx, "telegram", "1", id2)
+	if err != nil || !ok || delSess != "sess-b" {
+		t.Fatalf("delete saved: %q %v %v", delSess, ok, err)
+	}
+}
+
 func openTest(t *testing.T) *Store {
 	t.Helper()
 	s, err := Open(filepath.Join(t.TempDir(), "data"), "grok-4.7")

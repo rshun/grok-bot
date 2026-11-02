@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -31,6 +32,9 @@ func (b *Bot) Username() string {
 
 // Run polls until ctx is cancelled. handler should return quickly.
 func (b *Bot) Run(ctx context.Context, handler func(context.Context, platform.Inbound, platform.Replier)) error {
+	if err := b.registerCommands(); err != nil {
+		slog.Warn("telegram register commands failed", "err", err)
+	}
 	updates := tgbotapi.NewUpdate(0)
 	updates.Timeout = 30
 	updates.AllowedUpdates = []string{"message"}
@@ -100,5 +104,25 @@ func (b *Bot) MarkReceived(ctx context.Context, in platform.Inbound) error {
 		"reaction":   `[{"type":"emoji","emoji":"👀"}]`,
 		"is_big":     "false",
 	})
+	return err
+}
+
+func (b *Bot) registerCommands() error {
+	cfg := tgbotapi.NewSetMyCommands(
+		tgbotapi.BotCommand{Command: "status", Description: "查看运行状态与 MCP 概览"},
+		tgbotapi.BotCommand{Command: "stop", Description: "停止当前正在执行的任务"},
+		tgbotapi.BotCommand{Command: "new", Description: "归档当前会话并开启新话题"},
+		tgbotapi.BotCommand{Command: "sessions", Description: "查看或切换历史会话"},
+		tgbotapi.BotCommand{Command: "mcp", Description: "查看、诊断或增删改 MCP 服务"},
+		tgbotapi.BotCommand{Command: "memory", Description: "查看或管理永久长期记忆"},
+		tgbotapi.BotCommand{Command: "task", Description: "查看或管理定时任务"},
+		tgbotapi.BotCommand{Command: "model", Description: "查看或切换模型"},
+		tgbotapi.BotCommand{Command: "usage", Description: "查看订阅剩余额度"},
+		tgbotapi.BotCommand{Command: "dir", Description: "查看或管理可写目录"},
+		tgbotapi.BotCommand{Command: "shell", Description: "查看或开关命令执行权限"},
+		tgbotapi.BotCommand{Command: "reset", Description: "清空当前会话上下文（保留长期记忆）"},
+		tgbotapi.BotCommand{Command: "help", Description: "查看使用说明"},
+	)
+	_, err := b.api.Request(cfg)
 	return err
 }
