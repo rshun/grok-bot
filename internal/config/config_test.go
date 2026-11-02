@@ -102,6 +102,18 @@ func TestLoadEnvFile(t *testing.T) {
 	if cfg, err = Load(); err != nil || cfg.EnvFile != "/opt/bot/bot.env" {
 		t.Fatalf("%q %v", cfg.EnvFile, err)
 	}
+
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envPath, []byte("DEFAULT_MODEL=grok-4.6\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BOT_ENV_FILE", "")
+	t.Setenv("DEFAULT_MODEL", "")
+	loaded := LoadEnvFile("", filepath.Join(dir, "missing.env"), envPath)
+	if loaded != envPath || os.Getenv("BOT_ENV_FILE") != envPath || os.Getenv("DEFAULT_MODEL") != "grok-4.6" {
+		t.Fatalf("loaded=%q BOT_ENV_FILE=%q DEFAULT_MODEL=%q", loaded, os.Getenv("BOT_ENV_FILE"), os.Getenv("DEFAULT_MODEL"))
+	}
 }
 
 func TestLoadTaskSettings(t *testing.T) {

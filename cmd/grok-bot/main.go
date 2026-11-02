@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -26,9 +26,30 @@ import (
 var version = "dev"
 
 func main() {
+	inv, err := parseCLI(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error()+"\n\n"+cliUsage)
+		os.Exit(2)
+	}
+	switch inv.Mode {
+	case modeVersion:
+		fmt.Printf("grok-bot %s\n", version)
+		return
+	case modeHelp:
+		fmt.Println(cliUsage)
+		return
+	case modePush:
+		if isPushHelp(inv.PushArgs) {
+			fmt.Println(pushUsage)
+			return
+		}
+	}
+
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	exeDirs := executableDirs()
+	var loadedEnv string
 	if os.Getenv("TELEGRAM_BOT_TOKEN") == "" && os.Getenv("DISCORD_BOT_TOKEN") == "" {
-		config.LoadEnvFile(os.Getenv("BOT_ENV_FILE"), "/etc/grok-tg-bot.env", ".env")
+		loadedEnv = config.LoadEnvFile(envCandidatePaths(os.Getenv("BOT_ENV_FILE"), exeDirs)...)
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		config.LoadUserProfile(home)
@@ -39,8 +60,42 @@ func main() {
 		os.Exit(1)
 	}
 	cfg.Version = version
-	isTaskRun := len(os.Args) == 3 && os.Args[1] == "run-task"
-	isPushRun := len(os.Args) >= 2 && (os.Args[1] == "send" || os.Args[1] == "notify")
+	if os.Getenv("DATA_DIR") == "" {
+		cfg.DataDir = resolveDataDir(cfg.DataDir, loadedEnv, exeDirs)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		slog.Error("home dir", "err", err)
+		os.Exit(1)
+	}
+	dataDir, err := filepath.Abs(cfg.DataDir)
+	if err != nil {
+		slog.Error("data dir", "err", err)
+		os.Exit(1)
+	}
+	policy := sandbox.Policy{
+		Home:     home,
+		DataDir:  dataDir,
+		EnvFile:  cfg.EnvFile,
+		AuthPath: cfg.AuthPath,
+	}
+	if inv.Mode == modePush {
+		var db *store.Store
+		if fileExists(filepath.Join(cfg.DataDir, "bot.db")) {
+			if opened, openErr := store.Open(cfg.DataDir, cfg.DefaultModel); openErr == nil {
+				db = opened
+				defer db.Close()
+			}
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		if err := runPushCommand(ctx, cfg, db, policy, inv.PushArgs); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+
+	isTaskRun := inv.Mode == modeRunTask
 	workspaceName := "workspace"
 	if isTaskRun {
 		// Isolated workspace so one-shot cron runs do not overwrite the daemon's MCP port config.
@@ -67,34 +122,11 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
-	home, err := os.UserHomeDir()
-	if err != nil {
-		slog.Error("home dir", "err", err)
-		os.Exit(1)
-	}
-	dataDir, err := filepath.Abs(cfg.DataDir)
-	if err != nil {
-		slog.Error("data dir", "err", err)
-		os.Exit(1)
-	}
 	sandboxManager := &sandbox.Manager{
 		Path:          filepath.Join(home, ".grok", "sandbox.toml"),
 		Enabled:       sandbox.Supported(),
 		DenyAvailable: sandbox.BwrapAvailable,
-		Policy: sandbox.Policy{
-			Home:     home,
-			DataDir:  dataDir,
-			EnvFile:  cfg.EnvFile,
-			AuthPath: cfg.AuthPath,
-		},
-	}
-	if isPushRun {
-		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-		defer stop()
-		if err := runPushCommand(ctx, cfg, db, sandboxManager.Policy, os.Args[2:]); err != nil {
-			os.Exit(1)
-		}
-		return
+		Policy:        policy,
 	}
 	engine := &grok.Client{
 		Bin:        cfg.GrokBin,
@@ -190,13 +222,8 @@ func main() {
 		}()
 	}
 	if isTaskRun {
-		taskID, err := strconv.ParseInt(os.Args[2], 10, 64)
-		if err != nil {
-			slog.Error("run-task id", "arg", os.Args[2], "err", err)
-			os.Exit(1)
-		}
-		if err := svc.RunTaskByID(ctx, taskID); err != nil {
-			slog.Error("run-task", "id", taskID, "err", err)
+		if err := svc.RunTaskByID(ctx, inv.TaskID); err != nil {
+			slog.Error("run-task", "id", inv.TaskID, "err", err)
 			os.Exit(1)
 		}
 		return
@@ -225,6 +252,55 @@ func main() {
 	if failed {
 		os.Exit(1)
 	}
+}
+
+func executableDirs() []string {
+	exe, err := os.Executable()
+	if err != nil || exe == "" {
+		return nil
+	}
+	dirs := []string{filepath.Dir(exe)}
+	if real, err := filepath.EvalSymlinks(exe); err == nil && real != "" {
+		realDir := filepath.Dir(real)
+		if realDir != dirs[0] {
+			dirs = append(dirs, realDir)
+		}
+	}
+	return dirs
+}
+
+func envCandidatePaths(botEnvFile string, exeDirs []string) []string {
+	paths := []string{botEnvFile, "/etc/grok-tg-bot.env", ".env"}
+	for _, dir := range exeDirs {
+		if dir != "" {
+			paths = append(paths, filepath.Join(dir, ".env"))
+		}
+	}
+	return paths
+}
+
+func resolveDataDir(defaultDir, loadedEnv string, exeDirs []string) string {
+	if fileExists(filepath.Join(defaultDir, "bot.db")) {
+		return defaultDir
+	}
+	if loadedEnv != "" {
+		cand := filepath.Join(filepath.Dir(loadedEnv), "data")
+		if fileExists(filepath.Join(cand, "bot.db")) {
+			return cand
+		}
+	}
+	for _, dir := range exeDirs {
+		cand := filepath.Join(dir, "data")
+		if fileExists(filepath.Join(cand, "bot.db")) {
+			return cand
+		}
+	}
+	return defaultDir
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 func buildCrontab(envFile string) *schedule.Crontab {

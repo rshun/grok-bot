@@ -222,8 +222,9 @@ func digits(s string) bool {
 	return true
 }
 
-// LoadEnvFile populates unset environment variables from the first readable KEY=VALUE file.
-func LoadEnvFile(paths ...string) {
+// LoadEnvFile populates unset environment variables from the first readable KEY=VALUE file
+// and returns the resolved path of the loaded file (or "" if none was readable).
+func LoadEnvFile(paths ...string) string {
 	for _, p := range paths {
 		p = strings.TrimSpace(p)
 		if p == "" {
@@ -249,8 +250,16 @@ func LoadEnvFile(paths ...string) {
 				_ = os.Setenv(k, v)
 			}
 		}
-		return
+		resolved := p
+		if abs, absErr := filepath.Abs(p); absErr == nil {
+			resolved = abs
+		}
+		if os.Getenv("BOT_ENV_FILE") == "" {
+			_ = os.Setenv("BOT_ENV_FILE", resolved)
+		}
+		return resolved
 	}
+	return ""
 }
 
 var skipShellVars = map[string]bool{
