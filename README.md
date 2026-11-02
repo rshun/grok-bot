@@ -40,17 +40,20 @@ go test -mod=readonly ./...
 
 ### 本机脚本主动推送（`grok-bot send`）
 
-服务器上的其他业务脚本、监控告警或报表任务可直接复用 Bot 配置往你的私聊推消息与文件（无需另配一套推送脚本，自动执行敏感路径黑名单校验）：
+服务器上的其他业务脚本、监控告警或报表任务可直接复用 Bot 配置往你的私聊推消息与文件（无需另配一套推送脚本，自动查找程序同级目录 `.env`，自动执行敏感路径黑名单校验）：
 
 ```sh
-# 1. 直接发送文字通知（默认推送给最近活跃会话或首个白名单用户）
-grok-tg-bot send "盘前检查完成：今日无异常"
+# 1. 直接发送文字通知（默认同时推送给所有已配置平台的最近活跃会话或首个白名单用户）
+/home/grok/grok-bot/grok-bot send "盘前检查完成：今日无异常"
 
-# 2. 发送文字并附带报表文件（支持多个 --file）
-grok-tg-bot send "今日成交报表" --file /srv/centurion/fills.csv
+# 2. 仅推送到指定平台（支持 -p tg 或 -p dc，写在 send 前后均可）
+/home/grok/grok-bot/grok-bot send -p dc "仅发送到 Discord"
 
-# 3. 从标准输入管道读取输出发送
-centurion-live status | grok-tg-bot send
+# 3. 发送文字并附带报表文件（支持多个 --file）
+/home/grok/grok-bot/grok-bot send "今日成交报表" --file /srv/centurion/fills.csv
+
+# 4. 从标准输入管道读取输出发送
+centurion-live status | /home/grok/grok-bot/grok-bot send
 ```
 
 ### 会话恢复时的错误排查
