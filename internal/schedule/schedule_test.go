@@ -219,3 +219,50 @@ func TestCronExprAndMergeCrontab(t *testing.T) {
 		t.Fatalf("cleared got:\n%s", cleared)
 	}
 }
+
+func TestNextMonthlyAndCron(t *testing.T) {
+	// Monthly on 1st and 15th at 09:00
+	m := Spec{Kind: "monthly", Time: "09:00", MonthDays: []int{1, 15}}
+	if err := m.Validate(at(19, 10, 0, 0), loc, time.Hour); err != nil {
+		t.Fatalf("monthly validate: %v", err)
+	}
+	next, ok := m.Next(at(19, 10, 0, 0), loc)
+	want := time.Date(2026, 11, 1, 9, 0, 0, 0, loc)
+	if !ok || !next.Equal(want) {
+		t.Fatalf("monthly next got %v %v, want %v", next, ok, want)
+	}
+	expr, err := m.CronExpr(loc)
+	if err != nil || expr != "0 9 1,15 * *" {
+		t.Fatalf("monthly cron expr: %q %v", expr, err)
+	}
+
+	// Monthly last day (-1): Feb 2026 has 28 days
+	lastDay := Spec{Kind: "monthly", Time: "18:00", MonthDays: []int{-1}}
+	febStart := time.Date(2026, 2, 10, 12, 0, 0, 0, loc)
+	gotLast, ok := lastDay.Next(febStart, loc)
+	if !ok || !gotLast.Equal(time.Date(2026, 2, 28, 18, 0, 0, 0, loc)) {
+		t.Fatalf("feb last day got %v %v", gotLast, ok)
+	}
+	if lastDay.MatchesRun(time.Date(2026, 3, 28, 18, 0, 0, 0, loc), time.Time{}, loc) {
+		t.Fatal("March 28 must not match last-day-of-month")
+	}
+	if !lastDay.MatchesRun(time.Date(2026, 3, 31, 18, 0, 0, 0, loc), time.Time{}, loc) {
+		t.Fatal("March 31 must match last-day-of-month")
+	}
+
+	// Standard 5-field cron expression: weekdays at 09:30 and 15:00
+	c := Spec{Kind: "cron", Cron: "30 9 * * 1-5"}
+	if err := c.Validate(at(19, 10, 0, 0), loc, time.Hour); err != nil {
+		t.Fatalf("cron validate: %v", err)
+	}
+	// Oct 19, 2026 is Monday 10:00 -> next is Tue Oct 20 09:30
+	cNext, ok := c.Next(at(19, 10, 0, 0), loc)
+	if !ok || !cNext.Equal(at(20, 9, 30, 0)) {
+		t.Fatalf("cron next got %v %v", cNext, ok)
+	}
+	// Too frequent cron (< 60m) rejected by Validate
+	tooFast := Spec{Kind: "cron", Cron: "*/15 * * * *"}
+	if err := tooFast.Validate(at(19, 10, 0, 0), loc, time.Hour); err == nil {
+		t.Fatal("expected minInterval rejection for */15 cron")
+	}
+}

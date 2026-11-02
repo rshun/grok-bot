@@ -20,16 +20,20 @@ const (
 
 // Spec is when a task runs.
 type Spec struct {
-	// Kind is once, daily, weekly, interval or dates.
+	// Kind is once, daily, weekly, monthly, interval, dates or cron.
 	Kind string `json:"kind"`
 	// At is the local date and time of a once task.
 	At string `json:"at,omitempty"`
-	// Time is the local HH:MM of a daily, weekly or dates task.
+	// Time is the local HH:MM of a daily, weekly, monthly or dates task.
 	Time string `json:"time,omitempty"`
 	// Weekdays uses 0 for Sunday through 6 for Saturday.
-	Weekdays     []int  `json:"weekdays,omitempty"`
+	Weekdays []int `json:"weekdays,omitempty"`
+	// MonthDays uses 1..31, or -1 for the last day of each month.
+	MonthDays    []int  `json:"month_days,omitempty"`
 	EveryMinutes int    `json:"every_minutes,omitempty"`
 	DateFile     string `json:"date_file,omitempty"`
+	// Cron holds a standard 5-field cron expression ("min hour dom month dow") when Kind == "cron".
+	Cron string `json:"cron,omitempty"`
 }
 
 // Parsed is Grok's structured answer to a scheduling request.
@@ -57,12 +61,14 @@ type ExistingTask struct {
 const Schema = `{"type":"object","properties":{` +
 	`"action":{"type":"string","enum":["create","skip","pause","resume","delete","run","update","none"]},` +
 	`"task_id":{"type":"integer","description":"ID of the existing task when action is skip, pause, resume, delete, run or update"},` +
-	`"kind":{"type":"string","enum":["once","daily","weekly","interval","dates"]},` +
+	`"kind":{"type":"string","enum":["once","daily","weekly","monthly","interval","dates","cron"]},` +
 	`"at":{"type":"string","description":"once: local time YYYY-MM-DD HH:MM"},` +
-	`"time":{"type":"string","description":"daily, weekly or dates: local HH:MM"},` +
+	`"time":{"type":"string","description":"daily, weekly, monthly or dates: local HH:MM"},` +
 	`"weekdays":{"type":"array","items":{"type":"integer","minimum":0,"maximum":6}},` +
+	`"month_days":{"type":"array","items":{"type":"integer","minimum":-1,"maximum":31},"description":"monthly: days of month 1..31, or -1 for last day of month"},` +
 	`"every_minutes":{"type":"integer","minimum":1},` +
 	`"date_file":{"type":"string","description":"dates: absolute path to a file of YYYY-MM-DD or YYYYMMDD dates"},` +
+	`"cron":{"type":"string","description":"cron: standard 5-field cron expression (min hour dom month dow)"},` +
 	`"prompt":{"type":"string"},` +
 	`"summary":{"type":"string"},` +
 	`"error":{"type":"string"}}}`
@@ -86,9 +92,11 @@ Turn the scheduling request below into JSON.
 - To create a new scheduled task, set "action" to "create":
   - kind "once": set "at" to the local time as YYYY-MM-DD HH:MM.
   - kind "daily": set "time" to HH:MM.
-  - kind "weekly": set "time" to HH:MM and "weekdays" (0 = Sunday ... 6 = Saturday).
+	- kind "weekly": set "time" to HH:MM and "weekdays" (0 = Sunday ... 6 = Saturday; e.g. weekdays [1,2,3,4,5] for workdays/weekdays).
+  - kind "monthly": set "time" to HH:MM and "month_days" (1..31, or -1 for the last day of each month; e.g. "每月1号和15号早上9点" -> [1,15], "每月最后一天18:00" -> [-1]).
   - kind "interval": set "every_minutes".
   - kind "dates": when the request says to run according to dates in a file, set "date_file" to the file path and "time" to HH:MM (default "09:00" if no time of day is specified).
+  - kind "cron": when the user provides a 5-field cron expression or a complex recurring schedule (e.g. "每小时整点", "工作日9点到15点每小时"), set "cron" to a standard 5-field cron expression "min hour dom month dow".
   - "prompt": what Grok should do each time the task runs, as an instruction in the user's language, without the schedule.
   - "summary": one short Chinese line such as "每天 09:00：总结科技新闻".
 - To manage an existing task in natural language:
@@ -116,8 +124,11 @@ func Decode(structured json.RawMessage, text string) (Parsed, error) {
 		return Parsed{}, fmt.Errorf("decode schedule: %w", err)
 	}
 	p.DateFile = strings.TrimSpace(p.DateFile)
+	p.Cron = strings.TrimSpace(p.Cron)
 	if p.DateFile != "" {
 		p.Kind = "dates"
+	} else if p.Cron != "" && p.Kind == "" {
+		p.Kind = "cron"
 	}
 	if p.Kind == "dates" && strings.TrimSpace(p.Time) == "" {
 		p.Time = "09:00"
@@ -163,6 +174,18 @@ func (s Spec) Validate(now time.Time, loc *time.Location, minInterval time.Durat
 				return errors.New("星期几不对")
 			}
 		}
+	case "monthly":
+		if _, _, err := clock(s.Time); err != nil {
+			return err
+		}
+		if len(s.MonthDays) == 0 {
+			return errors.New("没有说是每月几号")
+		}
+		for _, d := range s.MonthDays {
+			if d == 0 || d < -1 || d > 31 {
+				return errors.New("每月日期需在 1..31 之间（或 -1 表示月末最后一天）")
+			}
+		}
 	case "interval":
 		if s.EveryMinutes <= 0 {
 			return errors.New("没有说间隔多久")
@@ -179,6 +202,19 @@ func (s Spec) Validate(now time.Time, loc *time.Location, minInterval time.Durat
 		}
 		if _, ok := s.Next(now, loc); !ok {
 			return errors.New("日期文件中没有未来的执行时间")
+		}
+	case "cron":
+		if _, err := ParseCron(s.Cron); err != nil {
+			return err
+		}
+		t1, ok1 := NextCron(s.Cron, now, loc)
+		if !ok1 {
+			return errors.New("Cron 表达式没有未来的执行时间")
+		}
+		if minInterval > time.Minute {
+			if t2, ok2 := NextCron(s.Cron, t1, loc); ok2 && t2.Sub(t1) < minInterval {
+				return fmt.Errorf("周期任务的间隔不能少于 %d 分钟", int(minInterval/time.Minute))
+			}
 		}
 	default:
 		return errors.New("不支持这种时间规则")
@@ -222,6 +258,21 @@ func (s Spec) Next(after time.Time, loc *time.Location) (time.Time, bool) {
 				return candidate, true
 			}
 		}
+	case "monthly":
+		hour, minute, err := clock(s.Time)
+		if err != nil || len(s.MonthDays) == 0 {
+			return time.Time{}, false
+		}
+		local := after.In(loc)
+		// Check up to 400 days ahead (handles Feb 29 / 31-day months cleanly).
+		for i := 0; i <= 1465; i++ {
+			day := time.Date(local.Year(), local.Month(), local.Day()+i, hour, minute, 0, 0, loc)
+			if day.After(after) && s.onMonthDay(day) {
+				return day, true
+			}
+		}
+	case "cron":
+		return NextCron(s.Cron, after, loc)
 	case "dates":
 		hour, minute, err := clock(s.Time)
 		if err != nil {
@@ -249,6 +300,17 @@ func (s Spec) Next(after time.Time, loc *time.Location) (time.Time, bool) {
 func (s Spec) onWeekday(day time.Weekday) bool {
 	for _, d := range s.Weekdays {
 		if time.Weekday(d) == day {
+			return true
+		}
+	}
+	return false
+}
+
+func (s Spec) onMonthDay(day time.Time) bool {
+	dom := day.Day()
+	isLast := day.AddDate(0, 0, 1).Day() == 1
+	for _, d := range s.MonthDays {
+		if d == dom || (d == -1 && isLast) {
 			return true
 		}
 	}
@@ -307,6 +369,9 @@ func (s Spec) MatchesRun(now, nextRun time.Time, loc *time.Location) bool {
 	}
 	if !nextRun.IsZero() && nextRun.After(now.Add(45*time.Second)) {
 		return false
+	}
+	if s.Kind == "monthly" {
+		return s.onMonthDay(now.In(loc))
 	}
 	if s.Kind == "dates" {
 		dates, err := readDateFile(s.DateFile, loc)

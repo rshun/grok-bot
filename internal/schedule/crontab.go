@@ -47,7 +47,7 @@ func (s Spec) CronExpr(loc *time.Location) (string, error) {
 	case "weekly":
 		hour, minute, err := clock(s.Time)
 		if err != nil {
-			return "", err
+			return "", errors.New("bad time")
 		}
 		if len(s.Weekdays) == 0 {
 			return "", errors.New("no weekdays")
@@ -66,6 +66,41 @@ func (s Spec) CronExpr(loc *time.Location) (string, error) {
 			parts[i] = strconv.Itoa(d)
 		}
 		return fmt.Sprintf("%d %d * * %s", minute, hour, strings.Join(parts, ",")), nil
+	case "monthly":
+		hour, minute, err := clock(s.Time)
+		if err != nil {
+			return "", err
+		}
+		if len(s.MonthDays) == 0 {
+			return "", errors.New("no month_days")
+		}
+		seen := map[int]bool{}
+		hasLast := false
+		for _, d := range s.MonthDays {
+			if d == -1 {
+				hasLast = true
+				for last := 28; last <= 31; last++ {
+					seen[last] = true
+				}
+			} else if d >= 1 && d <= 31 {
+				seen[d] = true
+			}
+		}
+		if len(seen) == 0 && !hasLast {
+			return "", errors.New("invalid month_days")
+		}
+		days := make([]int, 0, len(seen))
+		for d := range seen {
+			days = append(days, d)
+		}
+		sort.Ints(days)
+		parts := make([]string, len(days))
+		for i, d := range days {
+			parts[i] = strconv.Itoa(d)
+		}
+		return fmt.Sprintf("%d %d %s * *", minute, hour, strings.Join(parts, ",")), nil
+	case "cron":
+		return ParseCron(s.Cron)
 	case "interval":
 		if s.EveryMinutes <= 0 {
 			return "", errors.New("invalid interval")

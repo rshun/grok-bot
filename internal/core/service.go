@@ -68,15 +68,20 @@ type Service struct {
 }
 
 type lane struct {
-	ch    chan item
-	mu    sync.Mutex
-	depth int
+	ch        chan item
+	mu        sync.Mutex
+	depth     int
+	active    context.CancelFunc
+	runSeq    uint64
+	stopEpoch uint64
 }
 
 type item struct {
-	ctx context.Context
-	in  platform.Inbound
-	out platform.Replier
+	ctx     context.Context
+	baseCtx context.Context
+	in      platform.Inbound
+	out     platform.Replier
+	epoch   uint64
 	// task is set when the item is a scheduled run rather than a user message.
 	task *store.Task
 }
@@ -111,7 +116,12 @@ func (s *Service) Handle(ctx context.Context, in platform.Inbound, out platform.
 		return
 	}
 	lane := s.lane(in.Platform, in.ChatID)
-	ahead, ok := lane.reserve(s.limit())
+	if isStopInbound(in, lane.busy()) {
+		running, queued := lane.stop()
+		s.send(ctx, out, in.ChatID, stopReplyText(running, queued))
+		return
+	}
+	ahead, epoch, ok := lane.reserve(s.limit())
 	if !ok {
 		s.send(ctx, out, in.ChatID, "前面的消息还在处理，这条先放不下了。等回复后再发。")
 		return
@@ -127,7 +137,7 @@ func (s *Service) Handle(ctx context.Context, in platform.Inbound, out platform.
 	if ahead > 0 {
 		s.send(ctx, out, in.ChatID, fmt.Sprintf("已排队，前面还有 %d 条。", ahead))
 	}
-	lane.enqueue(item{ctx: ctx, in: in, out: out})
+	lane.enqueue(item{ctx: ctx, in: in, out: out, epoch: epoch})
 }
 
 func (s *Service) limit() int {
@@ -154,31 +164,84 @@ func (s *Service) lane(platformName, chatID string) *lane {
 	return ln
 }
 
-func (ln *lane) reserve(limit int) (ahead int, ok bool) {
+func (ln *lane) reserve(limit int) (ahead int, epoch uint64, ok bool) {
 	ln.mu.Lock()
 	defer ln.mu.Unlock()
 	if ln.depth >= limit {
-		return 0, false
+		return 0, 0, false
 	}
 	ahead = ln.depth
 	ln.depth++
-	return ahead, true
+	return ahead, ln.stopEpoch, true
+}
+
+func (ln *lane) busy() bool {
+	ln.mu.Lock()
+	defer ln.mu.Unlock()
+	return ln.depth > 0
+}
+
+func (ln *lane) stop() (stoppedRunning bool, droppedQueued int) {
+	ln.mu.Lock()
+	defer ln.mu.Unlock()
+	hadWork := ln.depth > 0
+	ln.stopEpoch++
+	for {
+		select {
+		case <-ln.ch:
+			ln.depth--
+			droppedQueued++
+		default:
+			goto drained
+		}
+	}
+drained:
+	if ln.active != nil {
+		ln.runSeq++
+		ln.active()
+		ln.active = nil
+		stoppedRunning = true
+	} else if hadWork && ln.depth > 0 {
+		// An item was popped from ln.ch and will be dropped immediately via stopEpoch.
+		stoppedRunning = true
+	}
+	return stoppedRunning, droppedQueued
 }
 
 func (ln *lane) enqueue(it item) {
 	ln.ch <- it
 }
 
-func (ln *lane) done() {
-	ln.mu.Lock()
-	ln.depth--
-	ln.mu.Unlock()
-}
-
 func (s *Service) work(ln *lane) {
 	for it := range ln.ch {
+		baseCtx := it.ctx
+		if baseCtx == nil {
+			baseCtx = context.Background()
+		}
+		runCtx, cancel := context.WithCancel(baseCtx)
+		ln.mu.Lock()
+		if it.epoch < ln.stopEpoch {
+			ln.depth--
+			ln.mu.Unlock()
+			cancel()
+			continue
+		}
+		ln.runSeq++
+		seq := ln.runSeq
+		ln.active = cancel
+		ln.mu.Unlock()
+
+		it.baseCtx = baseCtx
+		it.ctx = runCtx
 		s.dispatch(it)
-		ln.done()
+
+		ln.mu.Lock()
+		if ln.runSeq == seq {
+			ln.active = nil
+		}
+		ln.depth--
+		ln.mu.Unlock()
+		cancel()
 	}
 }
 
@@ -187,26 +250,42 @@ func (s *Service) dispatch(it item) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	baseCtx := it.baseCtx
+	stoppedByUser := func() bool {
+		return it.baseCtx != nil && ctx.Err() != nil && baseCtx.Err() == nil
+	}
+	if baseCtx == nil {
+		baseCtx = ctx
+	}
 	if it.task != nil {
 		text, files := s.runTask(ctx, it.in, it.out, *it.task)
-		s.send(ctx, it.out, it.in.ChatID, text)
+		if stoppedByUser() {
+			return
+		}
+		s.send(baseCtx, it.out, it.in.ChatID, text)
 		// A scheduled run has no message to quote.
-		s.flushFiles(ctx, it.out, it.in.ChatID, "", files)
+		s.flushFiles(baseCtx, it.out, it.in.ChatID, "", files)
 		return
 	}
 	view := s.startProgress(ctx, it)
 	reply, quiet, files, err := s.answer(ctx, it.in, it.out, view.onTool(ctx))
+	if stoppedByUser() {
+		if view != nil {
+			_ = view.Delete(baseCtx)
+		}
+		return
+	}
 	if err != nil {
 		slog.Error("chat turn failed", "chat", it.in.ChatID, "err", err)
 		reply, quiet, files = grok.UserFacing(err), false, nil
 	}
 	// The answer is shown first; the files follow it, each quoting the user's message.
-	defer func() { s.flushFiles(ctx, it.out, it.in.ChatID, it.in.MessageID, files) }()
+	defer func() { s.flushFiles(baseCtx, it.out, it.in.ChatID, it.in.MessageID, files) }()
 	if strings.TrimSpace(reply) == "" {
 		if quiet {
 			// The turn only reacted: the reaction is the answer, so the progress message goes away.
 			if view != nil {
-				_ = view.Delete(ctx)
+				_ = view.Delete(baseCtx)
 			}
 			return
 		}
@@ -214,10 +293,10 @@ func (s *Service) dispatch(it item) {
 	}
 	if view != nil {
 		// Finish falls back to new messages itself and logs its own failure; do not resend.
-		_ = view.Finish(ctx, reply)
+		_ = view.Finish(baseCtx, reply)
 		return
 	}
-	s.send(ctx, it.out, it.in.ChatID, reply)
+	s.send(baseCtx, it.out, it.in.ChatID, reply)
 }
 
 // answer returns the text to show and the files to send after it. quiet means the turn was
@@ -272,6 +351,20 @@ func (s *Service) command(ctx context.Context, in platform.Inbound, out platform
 	switch cmd {
 	case "/start", "/help":
 		return helpText(s.Version), nil, nil
+	case "/status":
+		text, err := s.statusCommand(ctx, in)
+		return text, nil, err
+	case "/stop", "/cancel":
+		return "当前没有正在执行的任务。", nil, nil
+	case "/new":
+		text, err := s.newTopicCommand(ctx, in, arg)
+		return text, nil, err
+	case "/sessions", "/session":
+		text, err := s.sessionsCommand(ctx, in, arg)
+		return text, nil, err
+	case "/mcp":
+		text, err := s.mcpCommand(ctx, arg)
+		return text, nil, err
 	case "/model":
 		text, err := s.modelCommand(ctx, in, arg)
 		return text, nil, err
@@ -447,6 +540,7 @@ func (s *Service) chatTurn(ctx context.Context, in platform.Inbound, out platfor
 	if err != nil {
 		if grok.IsMaxTurns(err) {
 			_ = s.Store.SetSession(ctx, in.Platform, in.ChatID, res.sessionID)
+			s.recordSessionTurn(ctx, in, res.sessionID, chat.Model, opts.Sandbox)
 			res.text = grok.UserFacing(err)
 			return res.chatResult, nil
 		}
@@ -455,6 +549,7 @@ func (s *Service) chatTurn(ctx context.Context, in platform.Inbound, out platfor
 	if err := s.Store.SetSession(ctx, in.Platform, in.ChatID, res.sessionID); err != nil {
 		return chatResult{}, err
 	}
+	s.recordSessionTurn(ctx, in, res.sessionID, chat.Model, opts.Sandbox)
 	return res.chatResult, nil
 }
 
@@ -476,6 +571,7 @@ func (s *Service) startSession(ctx context.Context, in platform.Inbound, out pla
 	if err != nil {
 		if grok.IsMaxTurns(err) {
 			_ = s.Store.StartSession(ctx, in.Platform, in.ChatID, res.sessionID, profile)
+			s.recordSessionTurn(ctx, in, res.sessionID, opts.Model, profile)
 			res.text = grok.UserFacing(err)
 			return res.chatResult, nil
 		}
@@ -484,6 +580,7 @@ func (s *Service) startSession(ctx context.Context, in platform.Inbound, out pla
 	if err := s.Store.StartSession(ctx, in.Platform, in.ChatID, res.sessionID, profile); err != nil {
 		return chatResult{}, err
 	}
+	s.recordSessionTurn(ctx, in, res.sessionID, opts.Model, profile)
 	return res.chatResult, nil
 }
 
@@ -550,13 +647,52 @@ func parseCommand(text string) (cmd, arg string, ok bool) {
 	return name, arg, true
 }
 
+func isStopInbound(in platform.Inbound, busy bool) bool {
+	if len(in.Images) > 0 || len(in.Files) > 0 {
+		return false
+	}
+	if cmd, arg, ok := parseCommand(in.Text); ok && arg == "" && (cmd == "/stop" || cmd == "/cancel") {
+		return true
+	}
+	if !busy {
+		return false
+	}
+	trimmed := strings.TrimRight(strings.TrimSpace(in.Text), "。！!？?")
+	switch trimmed {
+	case "停止", "停一下", "停止当前任务", "取消当前任务", "停止执行", "终止任务":
+		return true
+	}
+	return false
+}
+
+func stopReplyText(running bool, queued int) string {
+	switch {
+	case running && queued > 0:
+		return fmt.Sprintf("已停止当前任务，并取消了 %d 条排队中的消息。", queued)
+	case running:
+		return "已停止当前任务。"
+	case queued > 0:
+		return fmt.Sprintf("已取消 %d 条排队中的消息。", queued)
+	default:
+		return "当前没有正在执行的任务。"
+	}
+}
+
 func helpText(version string) string {
 	text := `直接发文字、图片或文件，我会接着这个聊天的上下文回复；引用任意消息回复时会自动带上被引用内容。
 
-/model
-    查看可用模型和当前模型
-/model 模型名
-    切换这个聊天之后使用的模型
+/status
+    查看运行状态、权限开关与 MCP 列表概览
+/stop
+    立即中断当前正在执行的对话或任务
+/new [备注]
+    归档当前会话并开启新话题（长期记忆继续保留）
+/sessions
+    查看最近保存的会话列表（/sessions 编号 切回旧话题）
+/mcp
+    查看、诊断或增删改 MCP 服务（/mcp doctor、/mcp add、/mcp del）
+/model [模型名]
+    查看或切换这个聊天使用的模型
 /usage
     查看订阅剩余额度
 /dir
@@ -566,7 +702,7 @@ func helpText(version string) string {
 /memory
     查看或管理长期记忆（也可直接说「长期记忆：内容」，执行 /reset 后仍会保留）
 /task 一句话
-    创建或管理定时任务（平时直接用自然语言说明即可）
+    创建或管理定时任务（支持每天/每周/每月/最后一天/工作日/5段Cron表达式）
 /task list
     查看定时任务
 /task run 编号

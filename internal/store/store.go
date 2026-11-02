@@ -44,6 +44,16 @@ type Memory struct {
 	Content string
 }
 
+// SavedSession is one archived or active Grok conversation thread for a chat.
+type SavedSession struct {
+	ID        int64
+	SessionID string
+	Title     string
+	Model     string
+	Sandbox   string
+	UpdatedAt time.Time
+}
+
 // runLayout is fixed-width UTC so next_run compares correctly as text.
 const runLayout = "2006-01-02T15:04:05Z"
 
@@ -129,6 +139,18 @@ func (s *Store) migrate() error {
 			created_at TEXT NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS memories_chat ON memories (platform, chat_id, id);
+		CREATE TABLE IF NOT EXISTS sessions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			platform TEXT NOT NULL,
+			chat_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			title TEXT NOT NULL,
+			model TEXT NOT NULL,
+			sandbox TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL,
+			UNIQUE (platform, chat_id, session_id)
+		);
+		CREATE INDEX IF NOT EXISTS sessions_chat ON sessions (platform, chat_id, updated_at DESC);
 	`)
 	if err != nil {
 		return err
@@ -442,6 +464,161 @@ func (s *Store) ClearMemories(ctx context.Context, platform, chatID string) (int
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+const maxSavedSessionsPerChat = 20
+
+// SaveSessionHistory records or updates a session in the chat's session history.
+// When overwriteTitle is false and an entry already has a non-empty title, the existing title is kept.
+func (s *Store) SaveSessionHistory(ctx context.Context, platform, chatID, sessionID, title, model, sandbox string, overwriteTitle bool) (int64, error) {
+	if sessionID == "" {
+		return 0, nil
+	}
+	if model == "" {
+		model = s.defaultModel
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339Nano)
+	var id int64
+	var existingTitle string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, title FROM sessions WHERE platform = ? AND chat_id = ? AND session_id = ?`,
+		platform, chatID, sessionID,
+	).Scan(&id, &existingTitle)
+	if err == nil {
+		finalTitle := existingTitle
+		if overwriteTitle && title != "" {
+			finalTitle = title
+		} else if finalTitle == "" {
+			finalTitle = title
+		}
+		_, err = s.db.ExecContext(ctx,
+			`UPDATE sessions SET title = ?, model = ?, sandbox = ?, updated_at = ? WHERE id = ?`,
+			finalTitle, model, sandbox, nowStr, id,
+		)
+		return id, err
+	}
+	if err != sql.ErrNoRows {
+		return 0, err
+	}
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO sessions (platform, chat_id, session_id, title, model, sandbox, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, platform, chatID, sessionID, title, model, sandbox, nowStr)
+	if err != nil {
+		return 0, fmt.Errorf("save session history: %w", err)
+	}
+	id, err = res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	// Keep only the most recent maxSavedSessionsPerChat entries per chat.
+	_, _ = s.db.ExecContext(ctx, `
+		DELETE FROM sessions
+		WHERE platform = ? AND chat_id = ? AND id NOT IN (
+			SELECT id FROM sessions WHERE platform = ? AND chat_id = ?
+			ORDER BY updated_at DESC, id DESC LIMIT ?
+		)
+	`, platform, chatID, platform, chatID, maxSavedSessionsPerChat)
+	return id, nil
+}
+
+// Sessions lists saved sessions for one chat, most recently active first.
+func (s *Store) Sessions(ctx context.Context, platform, chatID string) ([]SavedSession, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, session_id, title, model, sandbox, updated_at FROM sessions WHERE platform = ? AND chat_id = ? ORDER BY updated_at DESC, id DESC`,
+		platform, chatID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SavedSession
+	for rows.Next() {
+		var item SavedSession
+		var rawTime string
+		if err := rows.Scan(&item.ID, &item.SessionID, &item.Title, &item.Model, &item.Sandbox, &rawTime); err != nil {
+			return nil, err
+		}
+		if t, parseErr := time.Parse(time.RFC3339Nano, rawTime); parseErr == nil {
+			item.UpdatedAt = t
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// SessionByID loads one saved session belonging to the given chat.
+func (s *Store) SessionByID(ctx context.Context, platform, chatID string, id int64) (SavedSession, bool, error) {
+	var item SavedSession
+	var rawTime string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, session_id, title, model, sandbox, updated_at FROM sessions WHERE id = ? AND platform = ? AND chat_id = ?`,
+		id, platform, chatID,
+	).Scan(&item.ID, &item.SessionID, &item.Title, &item.Model, &item.Sandbox, &rawTime)
+	if err == sql.ErrNoRows {
+		return SavedSession{}, false, nil
+	}
+	if err != nil {
+		return SavedSession{}, false, err
+	}
+	if t, parseErr := time.Parse(time.RFC3339Nano, rawTime); parseErr == nil {
+		item.UpdatedAt = t
+	}
+	return item, true, nil
+}
+
+// ActivateSession switches a chat's active session, model, and sandbox to a saved session.
+func (s *Store) ActivateSession(ctx context.Context, platform, chatID string, saved SavedSession) error {
+	if err := s.upsert(ctx, platform, chatID, saved.SessionID, saved.Model, saved.Sandbox); err != nil {
+		return err
+	}
+	_, _ = s.SaveSessionHistory(ctx, platform, chatID, saved.SessionID, saved.Title, saved.Model, saved.Sandbox, false)
+	return nil
+}
+
+// DeleteSavedSession deletes one saved session for a chat and returns its session_id if deleted.
+func (s *Store) DeleteSavedSession(ctx context.Context, platform, chatID string, id int64) (string, bool, error) {
+	var sessionID string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT session_id FROM sessions WHERE id = ? AND platform = ? AND chat_id = ?`,
+		id, platform, chatID,
+	).Scan(&sessionID)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM sessions WHERE id = ? AND platform = ? AND chat_id = ?`,
+		id, platform, chatID,
+	)
+	if err != nil {
+		return "", false, err
+	}
+	n, err := res.RowsAffected()
+	return sessionID, n > 0, err
+}
+
+// KnownChats returns previously active chat IDs on a platform ordered by most recent update.
+func (s *Store) KnownChats(ctx context.Context, platform string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT chat_id FROM chats WHERE platform = ? ORDER BY updated_at DESC`,
+		platform,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) queryTasks(ctx context.Context, where string, args ...any) ([]Task, error) {

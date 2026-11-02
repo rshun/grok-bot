@@ -63,8 +63,87 @@ func (b *Bot) Run(ctx context.Context, handler func(context.Context, platform.In
 func (b *Bot) registerCommands() error {
 	_, err := b.session.ApplicationCommandBulkOverwrite(b.userID, "", []*discordgo.ApplicationCommand{
 		{Name: "help", Description: "查看说明"},
+		{Name: "status", Description: "查看运行状态与 MCP 概览"},
+		{Name: "stop", Description: "立即停止当前正在执行的任务"},
 		{Name: "usage", Description: "查看订阅剩余额度"},
-		{Name: "reset", Description: "清空这个聊天的上下文"},
+		{Name: "reset", Description: "清空这个聊天的上下文（长期记忆保留）"},
+		{
+			Name:        "new",
+			Description: "归档当前会话并开启新话题",
+			Options: []*discordgo.ApplicationCommandOption{
+				{Type: discordgo.ApplicationCommandOptionString, Name: "title", Description: "归档备注标题（可选）", Required: false},
+			},
+		},
+		{
+			Name:        "sessions",
+			Description: "查看或切换历史会话",
+			Options: []*discordgo.ApplicationCommandOption{
+				{Type: discordgo.ApplicationCommandOptionSubCommand, Name: "list", Description: "查看最近会话列表"},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "switch",
+					Description: "切回指定编号的历史会话",
+					Options: []*discordgo.ApplicationCommandOption{
+						{Type: discordgo.ApplicationCommandOptionInteger, Name: "id", Description: "会话编号", Required: true},
+					},
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "del",
+					Description: "删除指定编号的归档会话",
+					Options: []*discordgo.ApplicationCommandOption{
+						{Type: discordgo.ApplicationCommandOptionInteger, Name: "id", Description: "会话编号", Required: true},
+					},
+				},
+			},
+		},
+		{
+			Name:        "mcp",
+			Description: "查看、诊断或增删改 MCP 服务",
+			Options: []*discordgo.ApplicationCommandOption{
+				{Type: discordgo.ApplicationCommandOptionSubCommand, Name: "list", Description: "查看已配置的 MCP 服务"},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "doctor",
+					Description: "检查 MCP 握手连通状态",
+					Options: []*discordgo.ApplicationCommandOption{
+						{Type: discordgo.ApplicationCommandOptionString, Name: "name", Description: "单个服务名称（留空则检查全部）", Required: false},
+					},
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "add",
+					Description: "新增或更新 MCP 服务",
+					Options: []*discordgo.ApplicationCommandOption{
+						{Type: discordgo.ApplicationCommandOptionString, Name: "args", Description: "例如：sentry https://mcp.sentry.dev/mcp 或 fetch -- uvx mcp-server-fetch", Required: true},
+					},
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "enable",
+					Description: "启用某个 MCP 服务",
+					Options: []*discordgo.ApplicationCommandOption{
+						{Type: discordgo.ApplicationCommandOptionString, Name: "name", Description: "服务名称", Required: true},
+					},
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "disable",
+					Description: "停用某个 MCP 服务",
+					Options: []*discordgo.ApplicationCommandOption{
+						{Type: discordgo.ApplicationCommandOptionString, Name: "name", Description: "服务名称", Required: true},
+					},
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "del",
+					Description: "删除某个 MCP 服务",
+					Options: []*discordgo.ApplicationCommandOption{
+						{Type: discordgo.ApplicationCommandOptionString, Name: "name", Description: "服务名称", Required: true},
+					},
+				},
+			},
+		},
 		{
 			Name:        "model",
 			Description: "查看或切换这个聊天使用的模型",
@@ -226,6 +305,15 @@ func (b *Bot) Send(ctx context.Context, chatID, text string) error {
 	return b.send(ctx, chatID, text, "")
 }
 
+// OpenDM opens or retrieves a direct-message channel ID for a Discord user ID.
+func (b *Bot) OpenDM(ctx context.Context, userID string) (string, error) {
+	ch, err := b.session.UserChannelCreate(userID, discordgo.WithContext(ctx))
+	if err != nil {
+		return "", err
+	}
+	return ch.ID, nil
+}
+
 // messageReply keeps the triggering message with its queued reply.
 type messageReply struct {
 	*Bot
@@ -341,7 +429,16 @@ func commandText(data discordgo.ApplicationCommandInteractionData) string {
 			}
 		}
 		return "/shell"
-	case "dir", "task", "memory":
+	case "new":
+		for _, opt := range data.Options {
+			if opt.Name == "title" {
+				if title := strings.TrimSpace(opt.StringValue()); title != "" {
+					return "/new " + title
+				}
+			}
+		}
+		return "/new"
+	case "dir", "task", "memory", "sessions", "mcp":
 		return subcommandText(data)
 	default:
 		if data.Name == "" {
@@ -351,7 +448,7 @@ func commandText(data discordgo.ApplicationCommandInteractionData) string {
 	}
 }
 
-// subcommandText maps /dir, /task, and /memory subcommands to the text commands the core understands.
+// subcommandText maps /dir, /task, /memory, /sessions, and /mcp subcommands to the text commands the core understands.
 func subcommandText(data discordgo.ApplicationCommandInteractionData) string {
 	base := "/" + data.Name
 	if len(data.Options) == 0 {
@@ -372,13 +469,26 @@ func subcommandText(data discordgo.ApplicationCommandInteractionData) string {
 		return strings.Join([]string{base, "add", values["mode"], values["path"]}, " ")
 	case sub.Name == "del" && data.Name == "dir":
 		return base + " del " + values["path"]
+	case sub.Name == "del" && data.Name == "mcp":
+		return base + " del " + values["name"]
 	case sub.Name == "del":
 		return base + " del " + values["id"]
+	case data.Name == "sessions" && sub.Name == "switch":
+		return base + " " + values["id"]
+	case data.Name == "mcp" && sub.Name == "doctor":
+		if values["name"] != "" {
+			return base + " doctor " + values["name"]
+		}
+		return base + " doctor"
+	case data.Name == "mcp" && sub.Name == "add":
+		return base + " add " + values["args"]
+	case data.Name == "mcp" && (sub.Name == "enable" || sub.Name == "disable"):
+		return base + " " + sub.Name + " " + values["name"]
 	case data.Name == "task" && sub.Name == "add":
 		return base + " " + values["text"]
 	case data.Name == "memory" && sub.Name == "add":
 		return base + " add " + values["text"]
-	case (data.Name == "task" || data.Name == "memory") && sub.Name == "list":
+	case (data.Name == "task" || data.Name == "memory" || data.Name == "sessions" || data.Name == "mcp") && sub.Name == "list":
 		return base + " list"
 	case data.Name == "memory" && sub.Name == "clear":
 		return base + " clear"
