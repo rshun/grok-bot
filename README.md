@@ -1,6 +1,6 @@
 # grok-bot
 
-在 Telegram 或 Discord 的私聊里发文字或图片，这台机器上已登录的 Grok 订阅会接着上下文回复。不使用按量 API key。两个平台的上下文彼此分开。
+在 Telegram 或 Discord 的私聊里发文字或图片，这台机器上已登录的 Grok 订阅会接着上下文回复。不使用按量 API key。普通对话上下文按平台各自独立（在 TG 提问就在 TG 回复，在 Discord 提问就在 Discord 回复）；**长期记忆（`/memory`）和定时任务（`/task`）在 Telegram 与 Discord 之间自动同步共享，且定时任务触发时会同时推送到两个平台**。
 
 普通消息的接收提示与 `codex-tg-bot` 一致：Telegram 用 👀 表情回应原消息，Discord 显示输入状态；处理完再发结果，不再单独发送固定文字回执。命令直接返回结果，Discord 斜杠命令先延迟确认，再更新原响应。
 

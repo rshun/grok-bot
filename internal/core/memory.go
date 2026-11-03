@@ -22,13 +22,13 @@ const (
 
 const memoryUsage = `用法：
 /memory
-    查看当前聊天的长期记忆（/reset 后仍保留）
+    查看长期记忆（Telegram / Discord 自动同步，/reset 后仍保留）
 /memory add 内容
     添加一条长期记忆（也可直接发「长期记忆：内容」）
 /memory del 编号
     删除指定编号的长期记忆
 /memory clear
-    清空当前聊天的全部长期记忆`
+    清空全部长期记忆`
 
 const memorySchema = `{
   "type": "object",
@@ -58,11 +58,11 @@ var (
 	reMemoryPutInto = regexp.MustCompile(`^(?:请|帮我|麻烦)?把[「『"“]?(.+?)[」』"”]?(?:记入|加入|写入|存入|保存到|放进|放到|设为)(?:长期记忆|永久记忆)(?:里|中)?[。！!\s]*$`)
 )
 
-func (s *Service) chatMemories(ctx context.Context, platformName, chatID string) []string {
+func (s *Service) chatMemories(ctx context.Context, _, _ string) []string {
 	if s.Store == nil {
 		return nil
 	}
-	list, err := s.Store.Memories(ctx, platformName, chatID)
+	list, err := s.Store.AllMemories(ctx)
 	if err != nil {
 		slog.Error("load memories", "err", err)
 		return nil
@@ -70,8 +70,13 @@ func (s *Service) chatMemories(ctx context.Context, platformName, chatID string)
 	if len(list) == 0 {
 		return nil
 	}
+	seen := make(map[string]struct{}, len(list))
 	out := make([]string, 0, len(list))
 	for _, m := range list {
+		if _, dup := seen[m.Content]; dup {
+			continue
+		}
+		seen[m.Content] = struct{}{}
 		out = append(out, m.Content)
 	}
 	return out
@@ -108,16 +113,16 @@ func (s *Service) memoryCommand(ctx context.Context, in platform.Inbound, arg st
 	return s.memoryAdd(ctx, in, content)
 }
 
-func (s *Service) memoryList(ctx context.Context, in platform.Inbound) (string, error) {
-	list, err := s.Store.Memories(ctx, in.Platform, in.ChatID)
+func (s *Service) memoryList(ctx context.Context, _ platform.Inbound) (string, error) {
+	list, err := s.Store.AllMemories(ctx)
 	if err != nil {
 		return "", err
 	}
 	if len(list) == 0 {
-		return "当前没有保存的长期记忆。\n可直接发送「长期记忆：内容」或 `/memory add 内容` 添加（执行 /reset 后仍会保留）。", nil
+		return "当前没有保存的长期记忆。\n可直接发送「长期记忆：内容」或 `/memory add 内容` 添加（TG / Discord 自动同步，执行 /reset 后仍会保留）。", nil
 	}
 	var b strings.Builder
-	b.WriteString("长期记忆（执行 /reset 后仍会保留）：\n")
+	b.WriteString("长期记忆（TG / Discord 同步共享，执行 /reset 后仍会保留）：\n")
 	for _, m := range list {
 		fmt.Fprintf(&b, "#%d %s\n", m.ID, m.Content)
 	}
@@ -132,27 +137,27 @@ func (s *Service) memoryAdd(ctx context.Context, in platform.Inbound, content st
 	if utf8.RuneCountInString(content) > maxMemoryRunes {
 		return fmt.Sprintf("单条长期记忆最多 %d 个字符，请精简后再试。", maxMemoryRunes), nil
 	}
-	existing, err := s.Store.Memories(ctx, in.Platform, in.ChatID)
+	existing, err := s.Store.AllMemories(ctx)
 	if err != nil {
 		return "", err
 	}
 	for _, m := range existing {
 		if m.Content == content {
-			return fmt.Sprintf("长期记忆 #%d 已存在：%s（执行 /reset 后仍会保留）。", m.ID, content), nil
+			return fmt.Sprintf("长期记忆 #%d 已存在：%s（TG / Discord 同步生效，执行 /reset 后仍会保留）。", m.ID, content), nil
 		}
 	}
 	if len(existing) >= maxMemoriesPerChat {
-		return fmt.Sprintf("每个聊天最多保存 %d 条长期记忆，请先用 `/memory del 编号` 删除一些。", maxMemoriesPerChat), nil
+		return fmt.Sprintf("最多保存 %d 条长期记忆，请先用 `/memory del 编号` 删除一些。", maxMemoriesPerChat), nil
 	}
-	id, _, err := s.Store.AddMemory(ctx, in.Platform, in.ChatID, content)
+	id, _, err := s.Store.AddGlobalMemory(ctx, in.Platform, in.ChatID, content)
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("已永久保存长期记忆 #%d：%s\n（执行 /reset 清空上下文后仍会保留，可用 /memory 查看或删除。）", id, content), nil
+	return fmt.Sprintf("已永久保存长期记忆 #%d：%s\n（TG / Discord 已同步生效，执行 /reset 清空上下文后仍会保留，可用 /memory 查看或删除。）", id, content), nil
 }
 
-func (s *Service) memoryDelete(ctx context.Context, in platform.Inbound, id int64) (string, error) {
-	content, ok, err := s.Store.DeleteMemory(ctx, in.Platform, in.ChatID, id)
+func (s *Service) memoryDelete(ctx context.Context, _ platform.Inbound, id int64) (string, error) {
+	content, ok, err := s.Store.DeleteMemoryByID(ctx, id)
 	if err != nil {
 		return "", err
 	}
@@ -162,8 +167,8 @@ func (s *Service) memoryDelete(ctx context.Context, in platform.Inbound, id int6
 	return fmt.Sprintf("已删除长期记忆 #%d：%s。", id, content), nil
 }
 
-func (s *Service) memoryClear(ctx context.Context, in platform.Inbound) (string, error) {
-	n, err := s.Store.ClearMemories(ctx, in.Platform, in.ChatID)
+func (s *Service) memoryClear(ctx context.Context, _ platform.Inbound) (string, error) {
+	n, err := s.Store.ClearAllMemories(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -251,7 +256,7 @@ func (s *Service) classifyMemoryWithLLM(ctx context.Context, in platform.Inbound
 	if err != nil {
 		return parsedMemoryOp{}, false, err
 	}
-	existing, err := s.Store.Memories(ctx, in.Platform, in.ChatID)
+	existing, err := s.Store.AllMemories(ctx)
 	if err != nil {
 		return parsedMemoryOp{}, false, err
 	}

@@ -268,6 +268,38 @@ func TestSavedSessionsRoundTripAndSwitch(t *testing.T) {
 	}
 }
 
+func TestGlobalMemoriesAndDeleteTaskByID(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+
+	id1, added, err := s.AddGlobalMemory(ctx, "telegram", "1", "跨平台共享记忆")
+	if err != nil || !added || id1 != 1 {
+		t.Fatalf("AddGlobalMemory: id=%d added=%v err=%v", id1, added, err)
+	}
+	// Adding identical content from Discord deduplicates globally.
+	dupID, dupAdded, err := s.AddGlobalMemory(ctx, "discord", "99", "跨平台共享记忆")
+	if err != nil || dupAdded || dupID != id1 {
+		t.Fatalf("dup global memory: id=%d added=%v err=%v", dupID, dupAdded, err)
+	}
+	all, err := s.AllMemories(ctx)
+	if err != nil || len(all) != 1 || all[0].Content != "跨平台共享记忆" {
+		t.Fatalf("AllMemories: %#v %v", all, err)
+	}
+	if content, ok, err := s.DeleteMemoryByID(ctx, id1); err != nil || !ok || content != "跨平台共享记忆" {
+		t.Fatalf("DeleteMemoryByID: %q %v %v", content, ok, err)
+	}
+
+	tid, err := s.AddTask(ctx, Task{
+		Platform: "telegram", ChatID: "1", UserID: "1", Spec: `{"kind":"daily"}`, Prompt: "p", Summary: "s", NextRun: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.DeleteTaskByID(ctx, tid); err != nil || !ok {
+		t.Fatalf("DeleteTaskByID: %v %v", ok, err)
+	}
+}
+
 func openTest(t *testing.T) *Store {
 	t.Helper()
 	s, err := Open(filepath.Join(t.TempDir(), "data"), "grok-4.7")

@@ -178,3 +178,68 @@ func TestFreeFormLongTermMemoryViaStructuredFallback(t *testing.T) {
 		t.Fatalf("expected fallthrough to normal chat, got %q", chatReply)
 	}
 }
+
+func TestCrossPlatformMemorySyncKeepsConversationsSeparate(t *testing.T) {
+	eng := &memoryTestEngine{}
+	svc, st := newMemoryService(t, eng)
+	svc.AllowedUsers[platform.Discord] = map[string]struct{}{"dc_u1": {}}
+	ctx := context.Background()
+
+	// 1. Add memory on Telegram.
+	addReply := sendSync(t, svc, platform.Inbound{
+		Platform: platform.Telegram, ChatID: "tg_c1", UserID: "u1", Text: "长期记忆：每次回答都带上量化风控提醒",
+	})
+	if !strings.Contains(addReply, "已永久保存长期记忆 #1") {
+		t.Fatalf("TG add memory: %s", addReply)
+	}
+
+	// 2. View memory on Discord -> sees #1 immediately.
+	dcList := sendSync(t, svc, platform.Inbound{
+		Platform: platform.Discord, ChatID: "dc_c1", UserID: "dc_u1", Text: "/memory",
+	})
+	if !strings.Contains(dcList, "#1 每次回答都带上量化风控提醒") {
+		t.Fatalf("Discord /memory missing TG memory: %s", dcList)
+	}
+
+	// 3. Chat on Telegram and chat on Discord:
+	//    - Both inject the shared memory!
+	//    - Each platform keeps its own independent Grok SessionID and replies only to its own Replier!
+	var tgOut, dcOut memCapture
+	tgText, _, _, err := svc.answer(ctx, platform.Inbound{
+		Platform: platform.Telegram, ChatID: "tg_c1", UserID: "u1", Text: "TG上的问题", TextMessage: true,
+	}, &tgOut, nil)
+	if err != nil || tgText == "" {
+		t.Fatalf("TG chat err=%v text=%q", err, tgText)
+	}
+	dcText, _, _, err := svc.answer(ctx, platform.Inbound{
+		Platform: platform.Discord, ChatID: "dc_c1", UserID: "dc_u1", Text: "Discord上的问题", TextMessage: true,
+	}, &dcOut, nil)
+	if err != nil || dcText == "" {
+		t.Fatalf("Discord chat err=%v text=%q", err, dcText)
+	}
+	if len(eng.calls) != 2 {
+		t.Fatalf("expected 2 chat calls, got %d", len(eng.calls))
+	}
+	if len(eng.calls[0].Memories) != 1 || len(eng.calls[1].Memories) != 1 || eng.calls[1].Memories[0] != "每次回答都带上量化风控提醒" {
+		t.Fatalf("Discord call did not receive TG memory: %#v", eng.calls[1].Memories)
+	}
+	tgChat, _ := st.Chat(ctx, platform.Telegram, "tg_c1")
+	dcChat, _ := st.Chat(ctx, platform.Discord, "dc_c1")
+	if tgChat.SessionID == "" || dcChat.SessionID == "" || tgChat.SessionID == dcChat.SessionID {
+		t.Fatalf("expected separate chat sessions per platform, got tg=%q dc=%q", tgChat.SessionID, dcChat.SessionID)
+	}
+
+	// 4. Delete memory #1 from Discord -> Telegram also sees it deleted.
+	delReply := sendSync(t, svc, platform.Inbound{
+		Platform: platform.Discord, ChatID: "dc_c1", UserID: "dc_u1", Text: "/memory del 1",
+	})
+	if !strings.Contains(delReply, "已删除长期记忆 #1") {
+		t.Fatalf("Discord delete memory: %s", delReply)
+	}
+	tgAfterDel := sendSync(t, svc, platform.Inbound{
+		Platform: platform.Telegram, ChatID: "tg_c1", UserID: "u1", Text: "/memory",
+	})
+	if !strings.Contains(tgAfterDel, "当前没有保存的长期记忆") {
+		t.Fatalf("TG still saw deleted memory: %s", tgAfterDel)
+	}
+}
