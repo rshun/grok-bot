@@ -123,18 +123,81 @@ func TestTaskLimit(t *testing.T) {
 	}
 }
 
-func TestTaskDeleteOtherChat(t *testing.T) {
-	svc, _, _ := taskService(t, dailyNews)
-	id := addTask(t, svc, "other", dailyNews, "每天 09:00：看新闻", taskNow.Add(time.Hour))
-	rec := &recorder{}
-	say(svc, rec, "/task del "+strconv.FormatInt(id, 10))
-	got := rec.wait(t, 1)
-	if got[0] != "没有这个任务。" {
-		t.Fatalf("%#v", got)
+type fakeDiscordSender struct {
+	rec      *recorder
+	dmOpened string
+}
+
+func (f *fakeDiscordSender) Send(_ context.Context, chatID, text string) error {
+	f.rec.mu.Lock()
+	f.rec.msgs = append(f.rec.msgs, chatID+":"+text)
+	f.rec.mu.Unlock()
+	return nil
+}
+
+func (f *fakeDiscordSender) OpenDM(_ context.Context, userID string) (string, error) {
+	f.dmOpened = "dm-" + userID
+	return f.dmOpened, nil
+}
+
+func TestCrossPlatformTaskSyncAndDualDelivery(t *testing.T) {
+	svc, engine, tgSent := taskService(t, dailyNews)
+	dcRec := &recorder{}
+	dcSender := &fakeDiscordSender{rec: dcRec}
+	svc.AllowedUsers[platform.Discord] = map[string]struct{}{"dc_u1": {}}
+	svc.Senders[platform.Discord] = dcSender
+
+	// 1. Create a task on Telegram.
+	tgReply := &recorder{}
+	say(svc, tgReply, "/task 每天九点看新闻")
+	tgReply.wait(t, 1)
+
+	// 2. Discord sees the exact same task via `/task list`.
+	dcCmdReply := &recorder{}
+	svc.Handle(context.Background(), platform.Inbound{
+		Platform: platform.Discord, ChatID: "dc_chan_1", UserID: "dc_u1", Text: "/task list", TextMessage: true,
+	}, capture{dcCmdReply})
+	gotDCList := dcCmdReply.wait(t, 1)
+	if !strings.Contains(gotDCList[0], "#1 每天 09:00：看新闻") {
+		t.Fatalf("discord /task list missing TG task: %#v", gotDCList)
 	}
-	tasks, _ := svc.Store.Tasks(context.Background(), "telegram", "other")
-	if len(tasks) != 1 {
-		t.Fatalf("%#v", tasks)
+
+	// Clear cached dc_chan_1 so we also verify cold-start OpenDM fallback when crontab runs in a fresh process.
+	svc.mu.Lock()
+	svc.dmChannels = nil
+	svc.mu.Unlock()
+
+	// 3. RunTaskByID (crontab mode) executes Grok ONCE and pushes simultaneously to Telegram AND Discord!
+	svc.Now = func() time.Time { return time.Date(2026, 10, 19, 9, 0, 0, 0, taskZone) }
+	if err := svc.RunTaskByID(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	gotTG := tgSent.wait(t, 1)
+	gotDC := dcRec.wait(t, 1)
+	if !strings.Contains(gotTG[0], "⏰ 定时任务 #1") || !strings.Contains(gotTG[0], "今天的新闻") {
+		t.Fatalf("TG did not receive scheduled task: %#v", gotTG)
+	}
+	if !strings.HasPrefix(gotDC[0], "dm-dc_u1:⏰ 定时任务 #1") || !strings.Contains(gotDC[0], "今天的新闻") {
+		t.Fatalf("Discord did not receive scheduled task via OpenDM: %#v", gotDC)
+	}
+	engine.mu.Lock()
+	// 1 structured parse call + 1 task execution call = 2 total engine calls (not 3!).
+	callCount := len(engine.calls)
+	engine.mu.Unlock()
+	if callCount != 2 {
+		t.Fatalf("expected task to execute Grok once across both platforms (2 total calls), got %d", callCount)
+	}
+
+	// 4. Delete the task from Discord -> removed globally on both platforms.
+	svc.Handle(context.Background(), platform.Inbound{
+		Platform: platform.Discord, ChatID: "dc_chan_1", UserID: "dc_u1", Text: "/task del 1", TextMessage: true,
+	}, capture{dcCmdReply})
+	gotDCDel := dcCmdReply.wait(t, 2)
+	if !strings.Contains(gotDCDel[1], "已删除 #1") {
+		t.Fatalf("discord /task del failed: %#v", gotDCDel)
+	}
+	if all, _ := svc.Store.AllTasks(context.Background()); len(all) != 0 {
+		t.Fatalf("expected 0 tasks after cross-platform delete, got %#v", all)
 	}
 }
 

@@ -338,6 +338,16 @@ func (s *Store) DeleteTask(ctx context.Context, platform, chatID string, id int6
 	return n > 0, err
 }
 
+// DeleteTaskByID removes a scheduled task by ID regardless of originating platform/chat.
+func (s *Store) DeleteTaskByID(ctx context.Context, id int64) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM tasks WHERE id = ?`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 // DueTasks returns unpaused tasks whose next run is at or before now.
 func (s *Store) DueTasks(ctx context.Context, now time.Time) ([]Task, error) {
 	return s.queryTasks(ctx, `WHERE paused = 0 AND next_run <= ? ORDER BY next_run, id`, now.UTC().Format(runLayout))
@@ -460,6 +470,75 @@ func (s *Store) DeleteMemory(ctx context.Context, platform, chatID string, id in
 // ClearMemories deletes all persistent memories for one chat and returns the count removed.
 func (s *Store) ClearMemories(ctx context.Context, platform, chatID string) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM memories WHERE platform = ? AND chat_id = ?`, platform, chatID)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// AllMemories returns all persistent memories across platforms ordered by ID.
+func (s *Store) AllMemories(ctx context.Context) ([]Memory, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, content FROM memories ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Memory
+	for rows.Next() {
+		var m Memory
+		if err := rows.Scan(&m.ID, &m.Content); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// AddGlobalMemory stores a persistent memory shared across platforms if not already present.
+func (s *Store) AddGlobalMemory(ctx context.Context, platform, chatID, content string) (int64, bool, error) {
+	var existingID int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id FROM memories WHERE content = ? ORDER BY id LIMIT 1`,
+		content,
+	).Scan(&existingID)
+	if err == nil {
+		return existingID, false, nil
+	}
+	if err != sql.ErrNoRows {
+		return 0, false, err
+	}
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO memories (platform, chat_id, content, created_at)
+		VALUES (?, ?, ?, ?)
+	`, platform, chatID, content, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, false, fmt.Errorf("save memory: %w", err)
+	}
+	id, err := res.LastInsertId()
+	return id, true, err
+}
+
+// DeleteMemoryByID deletes a single memory by ID across platforms and returns its content if found.
+func (s *Store) DeleteMemoryByID(ctx context.Context, id int64) (string, bool, error) {
+	var content string
+	err := s.db.QueryRowContext(ctx, `SELECT content FROM memories WHERE id = ?`, id).Scan(&content)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM memories WHERE id = ?`, id)
+	if err != nil {
+		return "", false, err
+	}
+	n, err := res.RowsAffected()
+	return content, n > 0, err
+}
+
+// ClearAllMemories deletes all persistent memories across platforms and returns the count removed.
+func (s *Store) ClearAllMemories(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM memories`)
 	if err != nil {
 		return 0, err
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -79,7 +80,7 @@ func (s *Service) taskCommand(ctx context.Context, in platform.Inbound, out plat
 		if err != nil {
 			return s.taskCreateWithProgress(ctx, in, out, arg, onTool)
 		}
-		existing, err := s.Store.Tasks(ctx, in.Platform, in.ChatID)
+		existing, err := s.Store.AllTasks(ctx)
 		if err != nil {
 			return "", nil, err
 		}
@@ -89,7 +90,7 @@ func (s *Service) taskCommand(ctx context.Context, in platform.Inbound, out plat
 		if err != nil {
 			return s.taskCreateWithProgress(ctx, in, out, arg, onTool)
 		}
-		removed, err := s.Store.DeleteTask(ctx, in.Platform, in.ChatID, id)
+		removed, err := s.Store.DeleteTaskByID(ctx, id)
 		if err != nil {
 			return "", nil, err
 		}
@@ -114,16 +115,16 @@ func (s *Service) taskCommand(ctx context.Context, in platform.Inbound, out plat
 	}
 }
 
-func (s *Service) taskList(ctx context.Context, in platform.Inbound) (string, error) {
-	tasks, err := s.Store.Tasks(ctx, in.Platform, in.ChatID)
+func (s *Service) taskList(ctx context.Context, _ platform.Inbound) (string, error) {
+	tasks, err := s.Store.AllTasks(ctx)
 	if err != nil {
 		return "", err
 	}
 	if len(tasks) == 0 {
-		return "这个聊天没有定时任务。", nil
+		return "当前没有定时任务。", nil
 	}
 	var b strings.Builder
-	b.WriteString("定时任务：\n")
+	b.WriteString("定时任务（TG / Discord 同步共享并同时推送）：\n")
 	for _, t := range tasks {
 		if t.Paused {
 			fmt.Fprintf(&b, "#%d %s（已暂停）\n", t.ID, t.Summary)
@@ -135,7 +136,7 @@ func (s *Service) taskList(ctx context.Context, in platform.Inbound) (string, er
 }
 
 func (s *Service) taskCreateWithProgress(ctx context.Context, in platform.Inbound, out platform.Replier, text string, onTool func(grok.ToolUse)) (string, []actions.File, error) {
-	existing, err := s.Store.Tasks(ctx, in.Platform, in.ChatID)
+	existing, err := s.Store.AllTasks(ctx)
 	if err != nil {
 		return "", nil, err
 	}
@@ -248,14 +249,15 @@ func (s *Service) taskManage(ctx context.Context, in platform.Inbound, out platf
 	switch parsed.Action {
 	case "run":
 		runIn := platform.Inbound{
-			Platform:    target.Platform,
-			ChatID:      target.ChatID,
-			UserID:      target.UserID,
+			Platform:    in.Platform,
+			ChatID:      in.ChatID,
+			UserID:      in.UserID,
 			MessageID:   in.MessageID,
 			Text:        target.Prompt,
 			TextMessage: true,
 		}
 		reply, files := s.runTaskWithProgress(ctx, runIn, out, *target, onTool)
+		s.mirrorTaskToPeers(ctx, *target, in.Platform, reply, files)
 		return reply, files, nil
 	case "update":
 		if err := parsed.Validate(now, s.location(), s.minInterval()); err != nil {
@@ -283,7 +285,7 @@ func (s *Service) taskManage(ctx context.Context, in platform.Inbound, out platf
 		s.syncCrontab(ctx)
 		return fmt.Sprintf("已更新 #%d：%s。下次执行：%s。", target.ID, summary, next.In(s.location()).Format("01-02 15:04")), nil, nil
 	case "delete":
-		if _, err := s.Store.DeleteTask(ctx, in.Platform, in.ChatID, target.ID); err != nil {
+		if _, err := s.Store.DeleteTaskByID(ctx, target.ID); err != nil {
 			return "", nil, err
 		}
 		s.syncCrontab(ctx)
@@ -315,7 +317,7 @@ func (s *Service) taskManage(ctx context.Context, in platform.Inbound, out platf
 		oldNext := target.NextRun.In(s.location()).Format("01-02 15:04")
 		next, ok := taskNext(*target, base, s.location())
 		if !ok {
-			if _, err := s.Store.DeleteTask(ctx, in.Platform, in.ChatID, target.ID); err != nil {
+			if _, err := s.Store.DeleteTaskByID(ctx, target.ID); err != nil {
 				return "", nil, err
 			}
 			s.syncCrontab(ctx)
@@ -355,7 +357,7 @@ func (s *Service) tryNaturalTask(ctx context.Context, in platform.Inbound, out p
 	if text == "" {
 		return "", nil, false, nil
 	}
-	existing, err := s.Store.Tasks(ctx, in.Platform, in.ChatID)
+	existing, err := s.Store.AllTasks(ctx)
 	if err != nil {
 		return "", nil, false, err
 	}
@@ -512,20 +514,19 @@ func (s *Service) RunTaskByID(ctx context.Context, id int64) error {
 	if next, hasNext := spec.Next(now, s.location()); hasNext {
 		err = s.Store.SetNextRun(ctx, t.ID, next)
 	} else {
-		_, err = s.Store.DeleteTask(ctx, t.Platform, t.ChatID, t.ID)
+		_, err = s.Store.DeleteTaskByID(ctx, t.ID)
 	}
 	if err != nil {
 		return err
 	}
 	s.syncCrontab(ctx)
-	out := s.Senders[t.Platform]
-	if out == nil {
-		return fmt.Errorf("no sender for platform %q", t.Platform)
+	primary, ok := s.primaryTaskTarget(ctx, t)
+	if !ok {
+		return fmt.Errorf("no sender configured for task %d", t.ID)
 	}
-	in := platform.Inbound{Platform: t.Platform, ChatID: t.ChatID, UserID: t.UserID, Text: t.Prompt, TextMessage: true}
-	text, files := s.runTask(ctx, in, out, t)
-	s.send(ctx, out, t.ChatID, text)
-	s.flushFiles(ctx, out, t.ChatID, "", files)
+	in := platform.Inbound{Platform: primary.Platform, ChatID: primary.ChatID, UserID: t.UserID, Text: t.Prompt, TextMessage: true}
+	text, files := s.runTask(ctx, in, primary.Sender, t)
+	s.deliverTask(ctx, t, primary.Platform, primary.ChatID, primary.Sender, text, files)
 	return nil
 }
 
@@ -545,17 +546,18 @@ func (s *Service) catchUp(ctx context.Context) {
 			}
 			continue
 		}
-		if _, err := s.Store.DeleteTask(ctx, t.Platform, t.ChatID, t.ID); err != nil {
+		if _, err := s.Store.DeleteTaskByID(ctx, t.ID); err != nil {
 			slog.Error("delete missed task", "task", t.ID, "err", err)
 			continue
 		}
-		if out := s.Senders[t.Platform]; out != nil {
-			s.send(ctx, out, t.ChatID, taskHeader(t)+"\n\n已错过执行时间（当时 bot 没有运行），任务已删除。")
+		msg := taskHeader(t) + "\n\n已错过执行时间（当时 bot 没有运行），任务已删除。"
+		for _, target := range s.taskTargets(ctx, t) {
+			s.send(ctx, target.Sender, target.ChatID, msg)
 		}
 	}
 }
 
-// runDue moves each due task to its next run, then queues it on its chat.
+// runDue moves each due task to its next run, then queues it on its primary chat lane.
 func (s *Service) runDue(ctx context.Context) {
 	now := s.now()
 	tasks, err := s.Store.DueTasks(ctx, now)
@@ -568,18 +570,18 @@ func (s *Service) runDue(ctx context.Context) {
 		if next, ok := taskNext(t, now, s.location()); ok {
 			err = s.Store.SetNextRun(ctx, t.ID, next)
 		} else {
-			_, err = s.Store.DeleteTask(ctx, t.Platform, t.ChatID, t.ID)
+			_, err = s.Store.DeleteTaskByID(ctx, t.ID)
 		}
 		if err != nil {
 			slog.Error("reschedule task", "task", t.ID, "err", err)
 			continue
 		}
-		out := s.Senders[t.Platform]
-		if out == nil {
+		primary, ok := s.primaryTaskTarget(ctx, t)
+		if !ok {
 			slog.Error("no sender for task", "task", t.ID, "platform", t.Platform)
 			continue
 		}
-		ln := s.lane(t.Platform, t.ChatID)
+		ln := s.lane(primary.Platform, primary.ChatID)
 		_, epoch, ok := ln.reserve(s.limit())
 		if !ok {
 			slog.Warn("chat queue full, skipped task run", "task", t.ID)
@@ -588,8 +590,8 @@ func (s *Service) runDue(ctx context.Context) {
 		task := t
 		ln.enqueue(item{
 			ctx:   ctx,
-			in:    platform.Inbound{Platform: t.Platform, ChatID: t.ChatID, UserID: t.UserID, Text: t.Prompt, TextMessage: true},
-			out:   out,
+			in:    platform.Inbound{Platform: primary.Platform, ChatID: primary.ChatID, UserID: t.UserID, Text: t.Prompt, TextMessage: true},
+			out:   primary.Sender,
 			epoch: epoch,
 			task:  &task,
 		})
@@ -662,7 +664,7 @@ func (s *Service) taskCreateRawCron(ctx context.Context, in platform.Inbound, cr
 	if prompt == "" {
 		return "用法：`/task cron <分> <时> <日> <月> <周> <指令内容>`", nil
 	}
-	existing, err := s.Store.Tasks(ctx, in.Platform, in.ChatID)
+	existing, err := s.Store.AllTasks(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -698,4 +700,132 @@ func (s *Service) taskCreateRawCron(ctx context.Context, in platform.Inbound, cr
 	}
 	s.syncCrontab(ctx)
 	return fmt.Sprintf("已创建 #%d：%s。下次执行：%s。", id, summary, next.In(s.location()).Format("01-02 15:04")), nil
+}
+
+type taskTarget struct {
+	Platform string
+	ChatID   string
+	Sender   platform.Replier
+}
+
+func (s *Service) rememberChat(plat, chatID string) {
+	if plat == "" || chatID == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.dmChannels == nil {
+		s.dmChannels = map[string]string{}
+	}
+	s.dmChannels[plat] = chatID
+	s.mu.Unlock()
+}
+
+func (s *Service) cachedChat(plat string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dmChannels[plat]
+}
+
+// taskTargets returns all configured platform recipients (Telegram and Discord) for a scheduled task.
+func (s *Service) taskTargets(ctx context.Context, t store.Task) []taskTarget {
+	if len(s.Senders) == 0 {
+		return nil
+	}
+	order := []string{platform.Telegram, platform.Discord}
+	seen := map[string]bool{platform.Telegram: true, platform.Discord: true}
+	var extras []string
+	for plat := range s.Senders {
+		if !seen[plat] {
+			extras = append(extras, plat)
+		}
+	}
+	sort.Strings(extras)
+	order = append(order, extras...)
+
+	var targets []taskTarget
+	for _, plat := range order {
+		sender := s.Senders[plat]
+		if sender == nil {
+			continue
+		}
+		chatID := s.resolvePlatformChat(ctx, plat, t.Platform, t.ChatID)
+		if chatID == "" {
+			continue
+		}
+		targets = append(targets, taskTarget{Platform: plat, ChatID: chatID, Sender: sender})
+	}
+	return targets
+}
+
+func (s *Service) primaryTaskTarget(ctx context.Context, t store.Task) (taskTarget, bool) {
+	targets := s.taskTargets(ctx, t)
+	if len(targets) == 0 {
+		return taskTarget{}, false
+	}
+	for _, target := range targets {
+		if target.Platform == t.Platform {
+			return target, true
+		}
+	}
+	return targets[0], true
+}
+
+// deliverTask sends a scheduled task's output to its primary chat and simultaneously to all other configured platforms.
+func (s *Service) deliverTask(ctx context.Context, t store.Task, primaryPlat, primaryChatID string, primaryOut platform.Replier, text string, files []actions.File) {
+	if primaryOut != nil && primaryChatID != "" {
+		s.send(ctx, primaryOut, primaryChatID, text)
+		s.flushFiles(ctx, primaryOut, primaryChatID, "", files)
+	}
+	s.mirrorTaskToPeers(ctx, t, primaryPlat, text, files)
+}
+
+func (s *Service) mirrorTaskToPeers(ctx context.Context, t store.Task, skipPlatform, text string, files []actions.File) {
+	for _, target := range s.taskTargets(ctx, t) {
+		if target.Platform == skipPlatform {
+			continue
+		}
+		s.send(ctx, target.Sender, target.ChatID, text)
+		s.flushFiles(ctx, target.Sender, target.ChatID, "", files)
+	}
+}
+
+func (s *Service) resolvePlatformChat(ctx context.Context, plat, originPlat, originChatID string) string {
+	if plat == originPlat && originChatID != "" {
+		return originChatID
+	}
+	if cached := s.cachedChat(plat); cached != "" {
+		return cached
+	}
+	if s.Store != nil {
+		if known, err := s.Store.KnownChats(ctx, plat); err == nil && len(known) > 0 {
+			s.rememberChat(plat, known[0])
+			return known[0]
+		}
+	}
+	uid := firstSortedKey(s.AllowedUsers[plat])
+	if uid == "" {
+		return ""
+	}
+	if opener, ok := s.Senders[plat].(platform.DMOpener); ok {
+		dmID, err := opener.OpenDM(ctx, uid)
+		if err != nil {
+			slog.Error("open dm for scheduled task", "platform", plat, "err", safeErr(err))
+			return ""
+		}
+		s.rememberChat(plat, dmID)
+		return dmID
+	}
+	return uid
+}
+
+func firstSortedKey(m map[string]struct{}) string {
+	if len(m) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys[0]
 }

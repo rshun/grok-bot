@@ -42,9 +42,9 @@ func (s *Service) statusCommand(ctx context.Context, in platform.Inbound) (strin
 	if err != nil {
 		return "", err
 	}
-	memories, _ := s.Store.Memories(ctx, in.Platform, in.ChatID)
+	memories, _ := s.Store.AllMemories(ctx)
 	sessions, _ := s.Store.Sessions(ctx, in.Platform, in.ChatID)
-	tasks, _ := s.Store.Tasks(ctx, in.Platform, in.ChatID)
+	tasks, _ := s.Store.AllTasks(ctx)
 	rwDirs, _ := s.writeDirs(ctx)
 
 	activeTasks, pausedTasks := 0, 0

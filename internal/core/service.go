@@ -63,8 +63,9 @@ type Service struct {
 	// Now is the clock for scheduling; nil means time.Now.
 	Now func() time.Time
 
-	mu    sync.Mutex
-	lanes map[string]*lane
+	mu         sync.Mutex
+	lanes      map[string]*lane
+	dmChannels map[string]string
 }
 
 type lane struct {
@@ -95,6 +96,7 @@ func (s *Service) Handle(ctx context.Context, in platform.Inbound, out platform.
 		s.send(ctx, out, in.ChatID, "没有权限。")
 		return
 	}
+	s.rememberChat(in.Platform, in.ChatID)
 	if !in.TextMessage {
 		s.send(ctx, out, in.ChatID, unsupportedText)
 		return
@@ -262,9 +264,7 @@ func (s *Service) dispatch(it item) {
 		if stoppedByUser() {
 			return
 		}
-		s.send(baseCtx, it.out, it.in.ChatID, text)
-		// A scheduled run has no message to quote.
-		s.flushFiles(baseCtx, it.out, it.in.ChatID, "", files)
+		s.deliverTask(baseCtx, *it.task, it.in.Platform, it.in.ChatID, it.out, text, files)
 		return
 	}
 	view := s.startProgress(ctx, it)
@@ -700,9 +700,9 @@ func helpText(version string) string {
 /shell
     查看或开关服务器命令执行权限（/shell on、/shell off）
 /memory
-    查看或管理长期记忆（也可直接说「长期记忆：内容」，执行 /reset 后仍会保留）
+    查看或管理长期记忆（TG / Discord 自动同步，执行 /reset 后仍会保留）
 /task 一句话
-    创建或管理定时任务（支持每天/每周/每月/最后一天/工作日/5段Cron表达式）
+    创建或管理定时任务（TG / Discord 共享并同时推送，支持每天/每周/每月/最后一天/工作日/5段Cron）
 /task list
     查看定时任务
 /task run 编号
@@ -767,7 +767,7 @@ func (s *Service) withChatTasksContext(ctx context.Context, in platform.Inbound,
 	if !strings.Contains(in.Text, "任务") {
 		return prompt
 	}
-	tasks, err := s.Store.Tasks(ctx, in.Platform, in.ChatID)
+	tasks, err := s.Store.AllTasks(ctx)
 	if err != nil || len(tasks) == 0 {
 		return prompt
 	}

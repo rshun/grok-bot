@@ -174,3 +174,9 @@ type FileSender interface {
 	// FileLimit is the largest file in bytes the platform accepts.
 	FileLimit() int64
 }
+
+// DMOpener opens or resolves a direct-message channel ID for a user ID on platforms
+// (such as Discord) where DM channel IDs differ from user IDs.
+type DMOpener interface {
+	OpenDM(ctx context.Context, userID string) (string, error)
+}
