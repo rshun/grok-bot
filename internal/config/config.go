@@ -36,6 +36,7 @@ type Config struct {
 	GrokMaxTurns  int
 	QueueLimit    int
 	WebSearch     bool
+	LinkPrefetch  bool
 	AllowShell    bool
 	ShowProgress  bool
 	EnvFile       string
@@ -107,6 +108,13 @@ func Load() (Config, error) {
 		webSearch, err = strconv.ParseBool(raw)
 		if err != nil {
 			return Config{}, fmt.Errorf("WEB_SEARCH must be true or false")
+		}
+	}
+	linkPrefetch := true
+	if raw := strings.TrimSpace(os.Getenv("LINK_PREFETCH")); raw != "" {
+		linkPrefetch, err = strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("LINK_PREFETCH must be true or false")
 		}
 	}
 	allowShell := false
@@ -183,6 +191,7 @@ func Load() (Config, error) {
 		GrokMaxTurns:    maxTurns,
 		QueueLimit:      queueLimit,
 		WebSearch:       webSearch,
+		LinkPrefetch:    linkPrefetch,
 		AllowShell:      allowShell,
 		ShowProgress:    showProgress,
 		EnvFile:         envFile,

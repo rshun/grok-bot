@@ -180,3 +180,27 @@ type FileSender interface {
 type DMOpener interface {
 	OpenDM(ctx context.Context, userID string) (string, error)
 }
+
+// ButtonStyle controls the visual style of an inline button on platforms that support colors (e.g. Discord).
+type ButtonStyle int
+
+const (
+	ButtonSecondary ButtonStyle = iota
+	ButtonPrimary
+	ButtonSuccess
+	ButtonDanger
+)
+
+// Button is one interactive inline button attached below a bot message.
+// Command is the exact bot command string (such as "/model grok-4.7" or "/task run 1")
+// dispatched when the user clicks the button.
+type Button struct {
+	Label   string
+	Command string
+	Style   ButtonStyle
+}
+
+// ButtonReplier is an optional extension implemented by repliers that can attach interactive buttons.
+type ButtonReplier interface {
+	SendWithButtons(ctx context.Context, chatID, text string, rows [][]Button) error
+}

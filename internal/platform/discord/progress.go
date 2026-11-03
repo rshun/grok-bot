@@ -77,8 +77,13 @@ func (p *progressMessage) edit(ctx context.Context, text string) error {
 
 // sendOne sends a single quoted message and returns it.
 func (b *Bot) sendOne(ctx context.Context, chatID, text, replyTo string) (*discordgo.Message, error) {
+	return b.sendOneComponents(ctx, chatID, text, replyTo, nil)
+}
+
+func (b *Bot) sendOneComponents(ctx context.Context, chatID, text, replyTo string, components []discordgo.MessageComponent) (*discordgo.Message, error) {
 	out := &discordgo.MessageSend{
 		Content:         text,
+		Components:      components,
 		Flags:           discordgo.MessageFlagsSuppressEmbeds,
 		AllowedMentions: nobody(),
 	}

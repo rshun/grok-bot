@@ -1,6 +1,6 @@
 # grok-bot
 
-在 Telegram 或 Discord 的私聊里发文字或图片，这台机器上已登录的 Grok 订阅会接着上下文回复。不使用按量 API key。普通对话上下文按平台各自独立（在 TG 提问就在 TG 回复，在 Discord 提问就在 Discord 回复）；**长期记忆（`/memory`）和定时任务（`/task`）在 Telegram 与 Discord 之间自动同步共享，且定时任务触发时会同时推送到两个平台**。
+在 Telegram 或 Discord 的私聊里发文字、图片、文件或网页链接，这台机器上已登录的 Grok 订阅会接着上下文回复。不使用按量 API key。普通对话上下文按平台各自独立（在 TG 提问就在 TG 回复，在 Discord 提问就在 Discord 回复），同时支持通过 `/sessions` 或底部内联按钮**在 TG 与 Discord 之间一键跨平台接力同一段会话上下文**；**长期记忆（`/memory`）和定时任务（`/task`）在 Telegram 与 Discord 之间自动同步共享，且定时任务触发时会同时推送到两个平台**。
 
 普通消息的接收提示与 `codex-tg-bot` 一致：Telegram 用 👀 表情回应原消息，Discord 显示输入状态；处理完再发结果，不再单独发送固定文字回执。命令直接返回结果，Discord 斜杠命令先延迟确认，再更新原响应。
 
@@ -22,21 +22,30 @@ go test -mod=readonly ./...
 
 回滚时先备份当前改动，再确认并从修改前的文件备份逐项恢复 `internal/core/service.go`、`internal/core/service_test.go`、`internal/platform/platform.go`、两个平台的 `.go` 实现文件及本说明。新增的两个 `receipt_test.go` 需一并移至备份目录，避免引用已回滚的接口，不需要删除。已部署实例需要另行确认后恢复原二进制并重启；本地源码修改不会自动改变正在运行的服务。
 
-## 命令
+## 命令（支持 Telegram & Discord 交互式内联按钮）
 
-- `/status` 查看运行状态、权限开关、数据统计与 MCP 服务列表概览
+- `/status` 查看运行状态、权限开关、数据统计与 MCP 服务列表概览（底部附一键查额度、会话、任务、记忆、MCP 诊断、切模型按钮）
 - `/stop` 立即中断当前正在执行的对话或长任务（也可在运行中直接发「停止」/「停一下」）
-- `/new [备注]` 归档当前会话并开启新话题（长期记忆继续保留）
-- `/sessions` 查看最近保存的历史会话；`/sessions 编号` 切回旧话题；`/sessions del 编号` 删除归档会话
+- `/new [备注]` 归档当前会话并开启新话题（长期记忆继续保留，附一键切回按钮）
+- `/sessions` 查看 TG / Discord 跨平台保存的历史会话（来自另一平台的会话标有 `[来自 TG]` / `[来自 Discord]`）；点击按钮或发 `/sessions 编号` 一键切换/跨平台接力；`/sessions del 编号` 删除归档会话
 - `/mcp` 查看已配置 MCP 服务；`/mcp doctor [名称]` 检查握手连通状态；`/mcp add <名称> <URL 或 -- 命令...>` 新增/修改；`/mcp enable|disable <名称>` 启停；`/mcp del <名称>` 删除
-- `/model` 查看可用模型和当前模型；`/model grok-4.6` 切换模型
+- `/model` 查看可用模型和当前模型（附模型点选按钮）；`/model grok-4.6` 切换模型
 - `/usage` 查看订阅本期剩余额度
 - `/reset` 清空这个聊天的上下文（长期记忆仍会永久保留）
-- `/memory` 查看长期记忆；`/memory add 内容` 添加；`/memory del 编号` 删除；`/memory clear` 清空（平时直接说「长期记忆：内容」「查看长期记忆」「删除长期记忆 #1」即可，执行 `/reset` 后仍会保留）
+- `/memory` 查看长期记忆（附一键单条删除/清空按钮）；`/memory add 内容` 添加；`/memory del 编号` 删除；`/memory clear` 清空（平时直接说「长期记忆：内容」「查看长期记忆」「删除长期记忆 #1」即可，执行 `/reset` 后仍会保留）
 - `/dir` 查看可写目录；`/dir add rw /绝对路径` 允许写入；`/dir del /绝对路径` 取消写入（平时直接说"允许写入 /srv/out"即可）
-- `/shell` 查看服务器命令执行权限；`/shell on` 开启；`/shell off` 关闭（平时直接说"开启命令执行" / "关闭命令执行"即可）
-- `/task 一句话` 创建或管理定时任务（支持每天、每周、每月几号、月末最后一天、工作日、以及 `/task cron 分 时 日 月 周 指令` 直填 5 段 Cron 表达式）；`/task list` 查看；`/task run 编号` 立即试跑；`/task del 编号` 删除
+- `/shell` 查看服务器命令执行权限（附一键开启/关闭按钮）；`/shell on` 开启；`/shell off` 关闭（平时直接说"开启命令执行" / "关闭命令执行"即可）
+- `/task 一句话` 创建或管理定时任务（支持每天、每周、每月几号、月末最后一天、工作日、以及 `/task cron 分 时 日 月 周 指令` 直填 5 段 Cron 表达式）；`/task list` 查看（附一键试跑、暂停/恢复、删除按钮）；`/task run|pause|resume|skip|del 编号` 操作指定任务
 - `/help` 查看说明
+
+### 外链自动安全预抓取（`LINK_PREFETCH`）
+
+普通聊天消息中包含 `http://` 或 `https://` 链接时（最多自动提取前 3 条），bot 会在发给 Grok 之前自动做安全预抓取（内置严格 SSRF 防护，拒绝访问本机回环、局域网 RFC1918、CGNAT、Link-Local 等内网地址）：
+
+- **GitHub**：自动识别 PR、Issue、Commit、Blob 源码链接并拉取标题、描述、变更统计、修改文件列表或源码正文。
+- **X / Twitter**：自动识别 `x.com/.../status/...` 推文链接并提取作者、正文、长文标题与被引用推文。
+- **普通网页 / JSON / 纯文本**：自动提取网页 `<title>`、摘要与去噪后的正文文本。
+- 可通过环境变量 `LINK_PREFETCH=false` 关闭（默认 `true`）。
 
 ### 本机脚本主动推送（`grok-bot send`）
 

@@ -39,6 +39,10 @@ type Service struct {
 	Version      string
 	// WebSearch lets Grok search the web and open pages during chat turns.
 	WebSearch bool
+	// DisableLinkPrefetch turns off automatic URL / GitHub / X / webpage pre-fetching in user messages.
+	DisableLinkPrefetch bool
+	// LinkFetcher overrides the built-in SSRF-safe URL fetcher when non-nil (primarily for testing).
+	LinkFetcher func(ctx context.Context, rawURL string) (string, error)
 	// AllowShell is the default shell execution setting when not overridden via /shell.
 	AllowShell bool
 	// UploadDir is where user-uploaded document attachments are saved for Grok to inspect.
@@ -268,7 +272,7 @@ func (s *Service) dispatch(it item) {
 		return
 	}
 	view := s.startProgress(ctx, it)
-	reply, quiet, files, err := s.answer(ctx, it.in, it.out, view.onTool(ctx))
+	reply, quiet, files, buttons, err := s.answerWithButtons(ctx, it.in, it.out, view.onTool(ctx))
 	if stoppedByUser() {
 		if view != nil {
 			_ = view.Delete(baseCtx)
@@ -277,7 +281,7 @@ func (s *Service) dispatch(it item) {
 	}
 	if err != nil {
 		slog.Error("chat turn failed", "chat", it.in.ChatID, "err", err)
-		reply, quiet, files = grok.UserFacing(err), false, nil
+		reply, quiet, files, buttons = grok.UserFacing(err), false, nil, nil
 	}
 	// The answer is shown first; the files follow it, each quoting the user's message.
 	defer func() { s.flushFiles(baseCtx, it.out, it.in.ChatID, it.in.MessageID, files) }()
@@ -291,6 +295,15 @@ func (s *Service) dispatch(it item) {
 		}
 		reply = emptyReplyText
 	}
+	if len(buttons) > 0 {
+		if br, ok := it.out.(platform.ButtonReplier); ok {
+			if view != nil {
+				_ = view.Delete(baseCtx)
+			}
+			s.sendWithButtons(baseCtx, br, it.out, it.in.ChatID, reply, buttons)
+			return
+		}
+	}
 	if view != nil {
 		// Finish falls back to new messages itself and logs its own failure; do not resend.
 		_ = view.Finish(baseCtx, reply)
@@ -302,19 +315,24 @@ func (s *Service) dispatch(it item) {
 // answer returns the text to show and the files to send after it. quiet means the turn was
 // answered by a reaction alone, so an empty text is not a failure.
 func (s *Service) answer(ctx context.Context, in platform.Inbound, out platform.Replier, onTool func(grok.ToolUse)) (text string, quiet bool, files []actions.File, err error) {
+	text, quiet, files, _, err = s.answerWithButtons(ctx, in, out, onTool)
+	return text, quiet, files, err
+}
+
+func (s *Service) answerWithButtons(ctx context.Context, in platform.Inbound, out platform.Replier, onTool func(grok.ToolUse)) (text string, quiet bool, files []actions.File, buttons [][]platform.Button, err error) {
 	if cmd, arg, ok := parseInboundCommand(in); ok {
-		text, files, err = s.command(ctx, in, out, cmd, arg, onTool)
-		return text, false, files, err
+		text, files, buttons, err = s.command(ctx, in, out, cmd, arg, onTool)
+		return text, false, files, buttons, err
 	}
 	uploaded, fileFailure := s.saveUploads(ctx, in)
 	if fileFailure != "" {
-		return fileFailure, false, nil, nil
+		return fileFailure, false, nil, nil, nil
 	}
 	var memNote string
 	if len(in.Images) == 0 && len(uploaded) == 0 {
-		reply, followup, note, handled, err := s.tryNaturalMemory(ctx, in)
+		reply, followup, note, memBtns, handled, err := s.tryNaturalMemory(ctx, in)
 		if handled || err != nil {
-			return reply, false, nil, err
+			return reply, false, nil, memBtns, err
 		}
 		if followup != "" {
 			in.Text = followup
@@ -323,7 +341,7 @@ func (s *Service) answer(ctx context.Context, in platform.Inbound, out platform.
 	} else if content, rest, ok := parseExplicitMemoryAdd(in.Text); ok {
 		r, err := s.memoryAdd(ctx, in, content)
 		if err != nil {
-			return "", false, nil, err
+			return "", false, nil, nil, err
 		}
 		memNote = firstNoteLine(r)
 		in.Text = rest
@@ -333,94 +351,95 @@ func (s *Service) answer(ctx context.Context, in platform.Inbound, out platform.
 		if len(uploaded) > 0 {
 			taskIn.Text = formatUploadedFilesPrompt(in.Text, uploaded, false)
 		}
-		if reply, taskFiles, handled, err := s.tryNaturalTask(ctx, taskIn, out, onTool); handled || err != nil {
+		if reply, taskFiles, taskBtns, handled, err := s.tryNaturalTask(ctx, taskIn, out, onTool); handled || err != nil {
 			if memNote != "" && reply != "" {
 				reply = memNote + "\n\n" + reply
 			}
-			return reply, false, taskFiles, err
+			return reply, false, taskFiles, taskBtns, err
 		}
 	}
 	images, failure := s.loadImages(ctx, in)
 	if failure != "" {
-		return failure, false, nil, nil
+		return failure, false, nil, nil, nil
 	}
-	return s.chat(ctx, in, out, images, uploaded, memNote, onTool)
+	text, quiet, files, err = s.chat(ctx, in, out, images, uploaded, memNote, onTool)
+	return text, quiet, files, nil, err
 }
 
-func (s *Service) command(ctx context.Context, in platform.Inbound, out platform.Replier, cmd, arg string, onTool func(grok.ToolUse)) (string, []actions.File, error) {
+func (s *Service) command(ctx context.Context, in platform.Inbound, out platform.Replier, cmd, arg string, onTool func(grok.ToolUse)) (string, []actions.File, [][]platform.Button, error) {
 	switch cmd {
 	case "/start", "/help":
-		return helpText(s.Version), nil, nil
+		return helpText(s.Version), nil, nil, nil
 	case "/status":
-		text, err := s.statusCommand(ctx, in)
-		return text, nil, err
+		text, btns, err := s.statusCommand(ctx, in)
+		return text, nil, btns, err
 	case "/stop", "/cancel":
-		return "当前没有正在执行的任务。", nil, nil
+		return "当前没有正在执行的任务。", nil, nil, nil
 	case "/new":
-		text, err := s.newTopicCommand(ctx, in, arg)
-		return text, nil, err
+		text, btns, err := s.newTopicCommand(ctx, in, arg)
+		return text, nil, btns, err
 	case "/sessions", "/session":
-		text, err := s.sessionsCommand(ctx, in, arg)
-		return text, nil, err
+		text, btns, err := s.sessionsCommand(ctx, in, arg)
+		return text, nil, btns, err
 	case "/mcp":
 		text, err := s.mcpCommand(ctx, arg)
-		return text, nil, err
+		return text, nil, nil, err
 	case "/model":
-		text, err := s.modelCommand(ctx, in, arg)
-		return text, nil, err
+		text, btns, err := s.modelCommand(ctx, in, arg)
+		return text, nil, btns, err
 	case "/usage":
 		allowance, err := s.Engine.Allowance(ctx)
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
 		text := grok.FormatAllowance(allowance)
 		if strings.TrimSpace(text) == "" {
-			return "暂时查不到剩余额度。", nil, nil
+			return "暂时查不到剩余额度。", nil, nil, nil
 		}
-		return text, nil, nil
+		return text, nil, nil, nil
 	case "/dir":
 		text, err := s.dirCommand(ctx, in, arg)
-		return text, nil, err
+		return text, nil, nil, err
 	case "/shell":
-		text, err := s.shellCommand(ctx, arg)
-		return text, nil, err
+		text, btns, err := s.shellCommand(ctx, arg)
+		return text, nil, btns, err
 	case "/memory":
-		text, err := s.memoryCommand(ctx, in, arg)
-		return text, nil, err
+		text, btns, err := s.memoryCommand(ctx, in, arg)
+		return text, nil, btns, err
 	case "/task":
 		return s.taskCommand(ctx, in, out, arg, onTool)
 	case "/reset":
 		if err := s.Store.ClearSession(ctx, in.Platform, in.ChatID); err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
 		if memories := s.chatMemories(ctx, in.Platform, in.ChatID); len(memories) > 0 {
-			return fmt.Sprintf("已清空这个聊天的上下文（%d 条长期记忆继续保留）。", len(memories)), nil, nil
+			return fmt.Sprintf("已清空这个聊天的上下文（%d 条长期记忆继续保留）。", len(memories)), nil, nil, nil
 		}
-		return "已清空这个聊天的上下文。", nil, nil
+		return "已清空这个聊天的上下文。", nil, nil, nil
 	default:
-		return "没有这个命令。\n\n" + helpText(s.Version), nil, nil
+		return "没有这个命令。\n\n" + helpText(s.Version), nil, nil, nil
 	}
 }
 
-func (s *Service) modelCommand(ctx context.Context, in platform.Inbound, arg string) (string, error) {
+func (s *Service) modelCommand(ctx context.Context, in platform.Inbound, arg string) (string, [][]platform.Button, error) {
 	list, err := s.Engine.Models(ctx)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	chat, err := s.Store.Chat(ctx, in.Platform, in.ChatID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if arg == "" {
-		return formatModels(chat.Model, list), nil
+		return formatModels(chat.Model, list), modelButtons(chat.Model, list), nil
 	}
 	if !grok.ValidModelName(arg) || !containsModel(list, arg) {
-		return "没有这个模型。用 /model 查看可用模型。", nil
+		return "没有这个模型。用 /model 查看可用模型。", modelButtons(chat.Model, list), nil
 	}
 	if err := s.Store.SetModel(ctx, in.Platform, in.ChatID, arg); err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return "已切换到 " + arg + "。下一条消息开始使用。", nil
+	return "已切换到 " + arg + "。下一条消息开始使用。", nil, nil
 }
 
 // chat applies write grants from the message, runs the turn, and adds the
@@ -496,6 +515,7 @@ func (s *Service) chatTurn(ctx context.Context, in platform.Inbound, out platfor
 	if len(uploaded) > 0 {
 		prompt = formatUploadedFilesPrompt(prompt, uploaded, true)
 	}
+	prompt = s.withLinkPrefetch(ctx, in.Text, prompt)
 	prompt = s.withChatTasksContext(ctx, in, prompt)
 	prompt = withReplyQuote(prompt, in.ReplyToText)
 
@@ -618,6 +638,13 @@ func (s *Service) send(ctx context.Context, out platform.Replier, chatID, text s
 	}
 }
 
+func (s *Service) sendWithButtons(ctx context.Context, br platform.ButtonReplier, fallback platform.Replier, chatID, text string, rows [][]platform.Button) {
+	if err := br.SendWithButtons(ctx, chatID, text, rows); err != nil {
+		slog.Warn("send with buttons failed, falling back to plain send", "chat", chatID, "err", safeErr(err))
+		s.send(ctx, fallback, chatID, text)
+	}
+}
+
 // safeErr renders an error for logs without any request URL. Platform HTTP clients return
 // *url.Error whose text embeds the request URL, and a Telegram URL contains the bot token.
 func safeErr(err error) string {
@@ -679,20 +706,20 @@ func stopReplyText(running bool, queued int) string {
 }
 
 func helpText(version string) string {
-	text := `直接发文字、图片或文件，我会接着这个聊天的上下文回复；引用任意消息回复时会自动带上被引用内容。
+	text := `直接发文字、图片、文件或网页链接，我会接着当前平台的上下文回复；引用任意消息回复时会自动带上被引用内容，消息中的 GitHub / X / 网页链接会自动安全抓取摘要。
 
 /status
-    查看运行状态、权限开关与 MCP 列表概览
+    查看运行状态、权限开关与 MCP 列表概览（附快捷按钮）
 /stop
     立即中断当前正在执行的对话或任务
 /new [备注]
     归档当前会话并开启新话题（长期记忆继续保留）
 /sessions
-    查看最近保存的会话列表（/sessions 编号 切回旧话题）
+    查看 TG / Discord 跨平台历史会话（支持一键按钮或 /sessions 编号 跨平台接力）
 /mcp
     查看、诊断或增删改 MCP 服务（/mcp doctor、/mcp add、/mcp del）
 /model [模型名]
-    查看或切换这个聊天使用的模型
+    查看或点选切换这个聊天使用的模型
 /usage
     查看订阅剩余额度
 /dir
@@ -704,9 +731,11 @@ func helpText(version string) string {
 /task 一句话
     创建或管理定时任务（TG / Discord 共享并同时推送，支持每天/每周/每月/最后一天/工作日/5段Cron）
 /task list
-    查看定时任务
+    查看定时任务（附一键试跑/暂停/恢复/删除按钮）
 /task run 编号
     立即试跑一次定时任务（不影响正常排期）
+/task pause 编号 / /task resume 编号
+    暂停或恢复指定定时任务
 /task del 编号
     删除定时任务
 /reset

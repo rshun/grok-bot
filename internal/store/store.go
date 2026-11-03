@@ -44,9 +44,11 @@ type Memory struct {
 	Content string
 }
 
-// SavedSession is one archived or active Grok conversation thread for a chat.
+// SavedSession is one archived or active Grok conversation thread.
 type SavedSession struct {
 	ID        int64
+	Platform  string
+	ChatID    string
 	SessionID string
 	Title     string
 	Model     string
@@ -604,7 +606,7 @@ func (s *Store) SaveSessionHistory(ctx context.Context, platform, chatID, sessio
 // Sessions lists saved sessions for one chat, most recently active first.
 func (s *Store) Sessions(ctx context.Context, platform, chatID string) ([]SavedSession, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, session_id, title, model, sandbox, updated_at FROM sessions WHERE platform = ? AND chat_id = ? ORDER BY updated_at DESC, id DESC`,
+		`SELECT id, platform, chat_id, session_id, title, model, sandbox, updated_at FROM sessions WHERE platform = ? AND chat_id = ? ORDER BY updated_at DESC, id DESC`,
 		platform, chatID,
 	)
 	if err != nil {
@@ -615,7 +617,7 @@ func (s *Store) Sessions(ctx context.Context, platform, chatID string) ([]SavedS
 	for rows.Next() {
 		var item SavedSession
 		var rawTime string
-		if err := rows.Scan(&item.ID, &item.SessionID, &item.Title, &item.Model, &item.Sandbox, &rawTime); err != nil {
+		if err := rows.Scan(&item.ID, &item.Platform, &item.ChatID, &item.SessionID, &item.Title, &item.Model, &item.Sandbox, &rawTime); err != nil {
 			return nil, err
 		}
 		if t, parseErr := time.Parse(time.RFC3339Nano, rawTime); parseErr == nil {
@@ -626,14 +628,71 @@ func (s *Store) Sessions(ctx context.Context, platform, chatID string) ([]SavedS
 	return out, rows.Err()
 }
 
+// AllSessions lists saved sessions across all platforms/chats deduplicated by session_id
+// (keeping the most recently active entry for each Grok session), up to maxSavedSessionsPerChat.
+func (s *Store) AllSessions(ctx context.Context) ([]SavedSession, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, platform, chat_id, session_id, title, model, sandbox, updated_at FROM sessions ORDER BY updated_at DESC, id DESC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SavedSession
+	seen := make(map[string]int) // session_id -> index in out
+	for rows.Next() {
+		var item SavedSession
+		var rawTime string
+		if err := rows.Scan(&item.ID, &item.Platform, &item.ChatID, &item.SessionID, &item.Title, &item.Model, &item.Sandbox, &rawTime); err != nil {
+			return nil, err
+		}
+		if t, parseErr := time.Parse(time.RFC3339Nano, rawTime); parseErr == nil {
+			item.UpdatedAt = t
+		}
+		if idx, exists := seen[item.SessionID]; exists {
+			if out[idx].Title == "" && item.Title != "" {
+				out[idx].Title = item.Title
+			}
+			continue
+		}
+		if len(out) >= maxSavedSessionsPerChat {
+			continue
+		}
+		seen[item.SessionID] = len(out)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 // SessionByID loads one saved session belonging to the given chat.
 func (s *Store) SessionByID(ctx context.Context, platform, chatID string, id int64) (SavedSession, bool, error) {
 	var item SavedSession
 	var rawTime string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, session_id, title, model, sandbox, updated_at FROM sessions WHERE id = ? AND platform = ? AND chat_id = ?`,
+		`SELECT id, platform, chat_id, session_id, title, model, sandbox, updated_at FROM sessions WHERE id = ? AND platform = ? AND chat_id = ?`,
 		id, platform, chatID,
-	).Scan(&item.ID, &item.SessionID, &item.Title, &item.Model, &item.Sandbox, &rawTime)
+	).Scan(&item.ID, &item.Platform, &item.ChatID, &item.SessionID, &item.Title, &item.Model, &item.Sandbox, &rawTime)
+	if err == sql.ErrNoRows {
+		return SavedSession{}, false, nil
+	}
+	if err != nil {
+		return SavedSession{}, false, err
+	}
+	if t, parseErr := time.Parse(time.RFC3339Nano, rawTime); parseErr == nil {
+		item.UpdatedAt = t
+	}
+	return item, true, nil
+}
+
+// SessionByIDAny loads one saved session by ID regardless of originating platform/chat,
+// enabling cross-platform session handoff between Telegram and Discord.
+func (s *Store) SessionByIDAny(ctx context.Context, id int64) (SavedSession, bool, error) {
+	var item SavedSession
+	var rawTime string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, platform, chat_id, session_id, title, model, sandbox, updated_at FROM sessions WHERE id = ?`,
+		id,
+	).Scan(&item.ID, &item.Platform, &item.ChatID, &item.SessionID, &item.Title, &item.Model, &item.Sandbox, &rawTime)
 	if err == sql.ErrNoRows {
 		return SavedSession{}, false, nil
 	}
@@ -675,6 +734,26 @@ func (s *Store) DeleteSavedSession(ctx context.Context, platform, chatID string,
 	if err != nil {
 		return "", false, err
 	}
+	n, err := res.RowsAffected()
+	return sessionID, n > 0, err
+}
+
+// DeleteSavedSessionByID deletes a saved session by ID across platforms (removing all history
+// entries sharing that session_id and detaching any other chat pointing to it).
+func (s *Store) DeleteSavedSessionByID(ctx context.Context, id int64) (string, bool, error) {
+	var sessionID string
+	err := s.db.QueryRowContext(ctx, `SELECT session_id FROM sessions WHERE id = ?`, id).Scan(&sessionID)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE session_id = ?`, sessionID)
+	if err != nil {
+		return "", false, err
+	}
+	_, _ = s.db.ExecContext(ctx, `UPDATE chats SET session_id = '', sandbox = '' WHERE session_id = ?`, sessionID)
 	n, err := res.RowsAffected()
 	return sessionID, n > 0, err
 }
