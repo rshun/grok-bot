@@ -82,51 +82,54 @@ func (s *Service) chatMemories(ctx context.Context, _, _ string) []string {
 	return out
 }
 
-func (s *Service) memoryCommand(ctx context.Context, in platform.Inbound, arg string) (string, error) {
+func (s *Service) memoryCommand(ctx context.Context, in platform.Inbound, arg string) (string, [][]platform.Button, error) {
 	arg = strings.TrimSpace(arg)
 	if arg == "" || strings.EqualFold(arg, "list") {
 		return s.memoryList(ctx, in)
 	}
 	if strings.EqualFold(arg, "help") {
-		return memoryUsage, nil
+		return memoryUsage, nil, nil
 	}
 	if strings.EqualFold(arg, "clear") {
-		return s.memoryClear(ctx, in)
+		r, err := s.memoryClear(ctx, in)
+		return r, nil, err
 	}
 	fields := strings.Fields(arg)
 	if len(fields) >= 1 && strings.EqualFold(fields[0], "del") {
 		if len(fields) != 2 {
-			return memoryUsage, nil
+			return memoryUsage, nil, nil
 		}
 		id, err := strconv.ParseInt(strings.TrimPrefix(fields[1], "#"), 10, 64)
 		if err != nil || id <= 0 {
-			return memoryUsage, nil
+			return memoryUsage, nil, nil
 		}
-		return s.memoryDelete(ctx, in, id)
+		r, err := s.memoryDelete(ctx, in, id)
+		return r, nil, err
 	}
 	content := arg
 	if len(fields) >= 2 && strings.EqualFold(fields[0], "add") {
 		content = strings.TrimSpace(arg[len(fields[0]):])
 	} else if len(fields) == 1 && strings.EqualFold(fields[0], "add") {
-		return memoryUsage, nil
+		return memoryUsage, nil, nil
 	}
-	return s.memoryAdd(ctx, in, content)
+	r, err := s.memoryAdd(ctx, in, content)
+	return r, nil, err
 }
 
-func (s *Service) memoryList(ctx context.Context, _ platform.Inbound) (string, error) {
+func (s *Service) memoryList(ctx context.Context, _ platform.Inbound) (string, [][]platform.Button, error) {
 	list, err := s.Store.AllMemories(ctx)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if len(list) == 0 {
-		return "当前没有保存的长期记忆。\n可直接发送「长期记忆：内容」或 `/memory add 内容` 添加（TG / Discord 自动同步，执行 /reset 后仍会保留）。", nil
+		return "当前没有保存的长期记忆。\n可直接发送「长期记忆：内容」或 `/memory add 内容` 添加（TG / Discord 自动同步，执行 /reset 后仍会保留）。", nil, nil
 	}
 	var b strings.Builder
 	b.WriteString("长期记忆（TG / Discord 同步共享，执行 /reset 后仍会保留）：\n")
 	for _, m := range list {
 		fmt.Fprintf(&b, "#%d %s\n", m.ID, m.Content)
 	}
-	return strings.TrimSpace(b.String()), nil
+	return strings.TrimSpace(b.String()), memoryListButtons(list), nil
 }
 
 func (s *Service) memoryAdd(ctx context.Context, in platform.Inbound, content string) (string, error) {
@@ -182,73 +185,73 @@ func (s *Service) memoryClear(ctx context.Context, _ platform.Inbound) (string, 
 // directly without polluting or depending on the ephemeral Grok session. If the user's message
 // combines a memory instruction with a follow-up chat question, it returns handled=false after
 // leaving inline extraction or structured followup handling to run cleanly.
-func (s *Service) tryNaturalMemory(ctx context.Context, in platform.Inbound) (reply string, followup string, note string, handled bool, err error) {
+func (s *Service) tryNaturalMemory(ctx context.Context, in platform.Inbound) (reply string, followup string, note string, buttons [][]platform.Button, handled bool, err error) {
 	text := strings.TrimSpace(in.Text)
 	if text == "" || !mentionsMemoryConcept(text) {
-		return "", "", "", false, nil
+		return "", "", "", nil, false, nil
 	}
 
 	if looksLikeMemoryClear(text) {
 		r, err := s.memoryClear(ctx, in)
-		return r, "", "", true, err
+		return r, "", "", nil, true, err
 	}
 	if id, ok := parseMemoryDeleteID(text); ok {
 		r, err := s.memoryDelete(ctx, in, id)
-		return r, "", "", true, err
+		return r, "", "", nil, true, err
 	}
 	if looksLikeMemoryList(text) {
-		r, err := s.memoryList(ctx, in)
-		return r, "", "", true, err
+		r, btns, err := s.memoryList(ctx, in)
+		return r, "", "", btns, true, err
 	}
 	if content, rest, ok := parseExplicitMemoryAdd(text); ok {
 		r, err := s.memoryAdd(ctx, in, content)
 		if err != nil {
-			return "", "", "", false, err
+			return "", "", "", nil, false, err
 		}
 		if rest == "" {
-			return r, "", "", true, nil
+			return r, "", "", nil, true, nil
 		}
-		return "", rest, firstNoteLine(r), false, nil
+		return "", rest, firstNoteLine(r), nil, false, nil
 	}
 
 	// Fallback: when the user explicitly says "长期记忆" or "永久记忆" in free-form prose,
 	// ask a throwaway structured-output turn to classify whether they are managing long-term memory.
 	if !strings.Contains(text, "长期记忆") && !strings.Contains(text, "永久记忆") {
-		return "", "", "", false, nil
+		return "", "", "", nil, false, nil
 	}
 	op, ok, err := s.classifyMemoryWithLLM(ctx, in, text)
 	if err != nil || !ok || op.Action == "" || op.Action == "none" {
-		return "", "", "", false, nil
+		return "", "", "", nil, false, nil
 	}
 	switch op.Action {
 	case "list":
-		r, err := s.memoryList(ctx, in)
-		return r, "", "", true, err
+		r, btns, err := s.memoryList(ctx, in)
+		return r, "", "", btns, true, err
 	case "clear":
 		r, err := s.memoryClear(ctx, in)
-		return r, "", "", true, err
+		return r, "", "", nil, true, err
 	case "delete":
 		if op.MemoryID <= 0 {
-			return "", "", "", false, nil
+			return "", "", "", nil, false, nil
 		}
 		r, err := s.memoryDelete(ctx, in, op.MemoryID)
-		return r, "", "", true, err
+		return r, "", "", nil, true, err
 	case "add":
 		content := cleanMemoryContent(op.Content)
 		if content == "" {
-			return "", "", "", false, nil
+			return "", "", "", nil, false, nil
 		}
 		r, err := s.memoryAdd(ctx, in, content)
 		if err != nil {
-			return "", "", "", false, err
+			return "", "", "", nil, false, err
 		}
 		rest := strings.TrimSpace(op.Followup)
 		if rest == "" {
-			return r, "", "", true, nil
+			return r, "", "", nil, true, nil
 		}
-		return "", rest, firstNoteLine(r), false, nil
+		return "", rest, firstNoteLine(r), nil, false, nil
 	}
-	return "", "", "", false, nil
+	return "", "", "", nil, false, nil
 }
 
 func (s *Service) classifyMemoryWithLLM(ctx context.Context, in platform.Inbound, text string) (parsedMemoryOp, bool, error) {

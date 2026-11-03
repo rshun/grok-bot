@@ -148,26 +148,27 @@ func (s *Service) shellEnabled(ctx context.Context) bool {
 	return s.AllowShell
 }
 
-func (s *Service) shellCommand(ctx context.Context, arg string) (string, error) {
+func (s *Service) shellCommand(ctx context.Context, arg string) (string, [][]platform.Button, error) {
 	switch strings.ToLower(strings.TrimSpace(arg)) {
 	case "":
+		enabled := s.shellEnabled(ctx)
 		state := "已关闭"
-		if s.shellEnabled(ctx) {
+		if enabled {
 			state = "已开启"
 		}
-		return "当前服务器命令执行：" + state + "。\n用法：/shell on 开启，/shell off 关闭（或直接说「开启命令执行」/「关闭命令执行」）。", nil
+		return "当前服务器命令执行：" + state + "。\n用法：/shell on 开启，/shell off 关闭（或直接点击下方按钮切换）。", shellButtons(enabled), nil
 	case "on", "true", "1", "enable":
 		if err := s.Store.PutSetting(ctx, "allow_shell", "true"); err != nil {
-			return "", err
+			return "", nil, err
 		}
-		return "已开启服务器命令执行权限。", nil
+		return "已开启服务器命令执行权限。", shellButtons(true), nil
 	case "off", "false", "0", "disable":
 		if err := s.Store.PutSetting(ctx, "allow_shell", "false"); err != nil {
-			return "", err
+			return "", nil, err
 		}
-		return "已关闭服务器命令执行权限。", nil
+		return "已关闭服务器命令执行权限。", shellButtons(false), nil
 	default:
-		return "用法：/shell on 开启，/shell off 关闭。", nil
+		return "用法：/shell on 开启，/shell off 关闭。", shellButtons(s.shellEnabled(ctx)), nil
 	}
 }
 

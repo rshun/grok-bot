@@ -37,7 +37,7 @@ func (b *Bot) Run(ctx context.Context, handler func(context.Context, platform.In
 	}
 	updates := tgbotapi.NewUpdate(0)
 	updates.Timeout = 30
-	updates.AllowedUpdates = []string{"message"}
+	updates.AllowedUpdates = []string{"message", "callback_query"}
 	stream := b.api.GetUpdatesChan(updates)
 	go func() {
 		<-ctx.Done()
@@ -46,6 +46,10 @@ func (b *Bot) Run(ctx context.Context, handler func(context.Context, platform.In
 	group := newAlbums(ctx, handler)
 	defer group.stop()
 	for update := range stream {
+		if update.CallbackQuery != nil {
+			b.handleCallback(ctx, update.CallbackQuery, handler)
+			continue
+		}
 		msg := update.Message
 		if msg == nil || msg.From == nil {
 			continue

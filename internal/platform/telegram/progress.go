@@ -102,6 +102,10 @@ func (p *progressMessage) delete() error {
 
 // sendOne sends a single message and returns its ID.
 func (b *Bot) sendOne(chatID, text string, replyTo int) (int, error) {
+	return b.sendOneMarkup(chatID, text, replyTo, "")
+}
+
+func (b *Bot) sendOneMarkup(chatID, text string, replyTo int, replyMarkup string) (int, error) {
 	id, err := strconv.ParseInt(chatID, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("chat id: %w", err)
@@ -114,6 +118,9 @@ func (b *Bot) sendOne(chatID, text string, replyTo int) (int, error) {
 	}
 	if replyTo > 0 {
 		params["reply_parameters"] = fmt.Sprintf(`{"message_id":%d,"allow_sending_without_reply":true}`, replyTo)
+	}
+	if replyMarkup != "" {
+		params["reply_markup"] = replyMarkup
 	}
 	resp, err := b.api.MakeRequest("sendMessage", params)
 	if err != nil && strings.Contains(err.Error(), "can't parse entities") {

@@ -26,9 +26,11 @@ const taskUsage = `用法：
 /task 取消明天的定时任务 / 暂停定时任务 / 恢复定时任务
     用自然语言跳过下次、暂停、恢复或删除定时任务
 /task list
-    查看这个聊天的定时任务
+    查看定时任务
 /task run 编号
     立即试跑一次定时任务
+/task pause 编号 / /task resume 编号 / /task skip 编号
+    暂停、恢复或跳过下次定时任务
 /task del 编号
     删除定时任务`
 
@@ -67,61 +69,65 @@ func (s *Service) minInterval() time.Duration {
 	return s.TaskMinInterval
 }
 
-func (s *Service) taskCommand(ctx context.Context, in platform.Inbound, out platform.Replier, arg string, onTool func(grok.ToolUse)) (string, []actions.File, error) {
+func (s *Service) taskCommand(ctx context.Context, in platform.Inbound, out platform.Replier, arg string, onTool func(grok.ToolUse)) (string, []actions.File, [][]platform.Button, error) {
 	fields := strings.Fields(arg)
 	switch {
 	case len(fields) == 0:
-		return taskUsage, nil, nil
+		return taskUsage, nil, nil, nil
 	case len(fields) == 1 && fields[0] == "list":
-		reply, err := s.taskList(ctx, in)
-		return reply, nil, err
-	case fields[0] == "run" && len(fields) == 2:
+		reply, btns, err := s.taskList(ctx, in)
+		return reply, nil, btns, err
+	case (fields[0] == "run" || fields[0] == "pause" || fields[0] == "resume" || fields[0] == "skip") && len(fields) == 2:
+		action := fields[0]
 		id, err := strconv.ParseInt(strings.TrimPrefix(fields[1], "#"), 10, 64)
 		if err != nil {
-			return s.taskCreateWithProgress(ctx, in, out, arg, onTool)
+			reply, files, createErr := s.taskCreateWithProgress(ctx, in, out, arg, onTool)
+			return reply, files, nil, createErr
 		}
 		existing, err := s.Store.AllTasks(ctx)
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
-		return s.taskManage(ctx, in, out, existing, schedule.Parsed{Action: "run", TaskID: id}, s.now(), onTool)
+		reply, files, manageErr := s.taskManage(ctx, in, out, existing, schedule.Parsed{Action: action, TaskID: id}, s.now(), onTool)
+		return reply, files, nil, manageErr
 	case fields[0] == "del" && len(fields) == 2:
 		id, err := strconv.ParseInt(strings.TrimPrefix(fields[1], "#"), 10, 64)
 		if err != nil {
-			return s.taskCreateWithProgress(ctx, in, out, arg, onTool)
+			reply, files, createErr := s.taskCreateWithProgress(ctx, in, out, arg, onTool)
+			return reply, files, nil, createErr
 		}
 		removed, err := s.Store.DeleteTaskByID(ctx, id)
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
 		if !removed {
-			return "没有这个任务。", nil, nil
+			return "没有这个任务。", nil, nil, nil
 		}
 		s.syncCrontab(ctx)
-		return fmt.Sprintf("已删除 #%d。", id), nil, nil
-	case fields[0] == "del" && len(fields) == 1:
-		return taskUsage, nil, nil
+		return fmt.Sprintf("已删除 #%d。", id), nil, nil, nil
+	case (fields[0] == "del" || fields[0] == "pause" || fields[0] == "resume" || fields[0] == "skip") && len(fields) == 1:
+		return taskUsage, nil, nil, nil
 	case fields[0] == "cron" && len(fields) >= 7:
 		reply, err := s.taskCreateRawCron(ctx, in, fields[1:6], strings.Join(fields[6:], " "))
-		return reply, nil, err
+		return reply, nil, nil, err
 	case fields[0] == "cron":
-		return "用法：`/task cron <分> <时> <日> <月> <周> <指令内容>`（例如：`/task cron 30 9 1 * * 汇总上月账单`）", nil, nil
+		return "用法：`/task cron <分> <时> <日> <月> <周> <指令内容>`（例如：`/task cron 30 9 1 * * 汇总上月账单`）", nil, nil, nil
 	default:
 		reply, files, err := s.taskCreateWithProgress(ctx, in, out, arg, onTool)
 		if errors.Is(err, errNotTask) {
-			return notUnderstood, nil, nil
+			return notUnderstood, nil, nil, nil
 		}
-		return reply, files, err
+		return reply, files, nil, err
 	}
 }
 
-func (s *Service) taskList(ctx context.Context, _ platform.Inbound) (string, error) {
+func (s *Service) taskList(ctx context.Context, _ platform.Inbound) (string, [][]platform.Button, error) {
 	tasks, err := s.Store.AllTasks(ctx)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if len(tasks) == 0 {
-		return "当前没有定时任务。", nil
+		return "当前没有定时任务。", nil, nil
 	}
 	var b strings.Builder
 	b.WriteString("定时任务（TG / Discord 同步共享并同时推送）：\n")
@@ -132,7 +138,7 @@ func (s *Service) taskList(ctx context.Context, _ platform.Inbound) (string, err
 		}
 		fmt.Fprintf(&b, "#%d %s（下次 %s）\n", t.ID, t.Summary, t.NextRun.In(s.location()).Format("01-02 15:04"))
 	}
-	return strings.TrimSpace(b.String()), nil
+	return strings.TrimSpace(b.String()), taskListButtons(tasks), nil
 }
 
 func (s *Service) taskCreateWithProgress(ctx context.Context, in platform.Inbound, out platform.Replier, text string, onTool func(grok.ToolUse)) (string, []actions.File, error) {
@@ -352,33 +358,33 @@ func looksLikeTaskManage(text string) bool {
 
 // tryNaturalTask handles natural-language task creation, listing, running, updating,
 // skipping, pausing, resuming and deletion in ordinary chat without requiring /task.
-func (s *Service) tryNaturalTask(ctx context.Context, in platform.Inbound, out platform.Replier, onTool func(grok.ToolUse)) (string, []actions.File, bool, error) {
+func (s *Service) tryNaturalTask(ctx context.Context, in platform.Inbound, out platform.Replier, onTool func(grok.ToolUse)) (string, []actions.File, [][]platform.Button, bool, error) {
 	text := strings.TrimSpace(in.Text)
 	if text == "" {
-		return "", nil, false, nil
+		return "", nil, nil, false, nil
 	}
 	existing, err := s.Store.AllTasks(ctx)
 	if err != nil {
-		return "", nil, false, err
+		return "", nil, nil, false, err
 	}
 	if looksLikeTaskList(text, len(existing) > 0) {
-		reply, err := s.taskList(ctx, in)
-		return reply, nil, true, err
+		reply, btns, err := s.taskList(ctx, in)
+		return reply, nil, btns, true, err
 	}
 	if !looksLikeNaturalTask(text, existing) {
-		return "", nil, false, nil
+		return "", nil, nil, false, nil
 	}
 	reply, files, err := s.taskCreateWithProgress(ctx, in, out, text, onTool)
 	if errors.Is(err, errNotTask) {
-		return "", nil, false, nil
+		return "", nil, nil, false, nil
 	}
 	if err != nil {
-		return "", nil, false, err
+		return "", nil, nil, false, err
 	}
 	if strings.HasPrefix(reply, notUnderstood) && !mentionsTaskExplicitly(text) {
-		return "", nil, false, nil
+		return "", nil, nil, false, nil
 	}
-	return reply, files, true, nil
+	return reply, files, nil, true, nil
 }
 
 func mentionsTaskExplicitly(text string) bool {

@@ -37,13 +37,13 @@ const mcpUsage = `用法：
 
 安全提示：涉及鉴权 Token 的变量建议写入服务器 ~/.bash_profile，避免在聊天记录中明文发送密钥。`
 
-func (s *Service) statusCommand(ctx context.Context, in platform.Inbound) (string, error) {
+func (s *Service) statusCommand(ctx context.Context, in platform.Inbound) (string, [][]platform.Button, error) {
 	chat, err := s.Store.Chat(ctx, in.Platform, in.ChatID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	memories, _ := s.Store.AllMemories(ctx)
-	sessions, _ := s.Store.Sessions(ctx, in.Platform, in.ChatID)
+	sessions, _ := s.Store.AllSessions(ctx)
 	tasks, _ := s.Store.AllTasks(ctx)
 	rwDirs, _ := s.writeDirs(ctx)
 
@@ -83,11 +83,12 @@ func (s *Service) statusCommand(ctx context.Context, in platform.Inbound) (strin
 		}
 	}
 	fmt.Fprintf(&b, "- 当前模型：%s\n", chat.Model)
-	fmt.Fprintf(&b, "- 当前会话：%s（共保存 %d 个历史会话）\n", sessionDesc, len(sessions))
+	fmt.Fprintf(&b, "- 当前会话：%s（共保存 %d 个跨平台历史会话）\n", sessionDesc, len(sessions))
 	fmt.Fprintf(&b, "- 联网搜索：%s\n", onOffText(s.WebSearch))
+	fmt.Fprintf(&b, "- 外链预处理：%s\n", onOffText(!s.DisableLinkPrefetch))
 	fmt.Fprintf(&b, "- 命令执行：%s\n", onOffText(s.shellEnabled(ctx)))
 	fmt.Fprintf(&b, "- 可写目录：%d 个\n", len(rwDirs))
-	fmt.Fprintf(&b, "- 长期记忆：%d 条（/reset 后保留）\n", len(memories))
+	fmt.Fprintf(&b, "- 长期记忆：%d 条（TG / Discord 同步，/reset 后保留）\n", len(memories))
 	fmt.Fprintf(&b, "- 定时任务：%d 个运行中 / %d 个已暂停\n", activeTasks, pausedTasks)
 
 	if mcpEng, ok := s.Engine.(MCPEngine); ok {
@@ -97,7 +98,7 @@ func (s *Service) statusCommand(ctx context.Context, in platform.Inbound) (strin
 			b.WriteString("\n```")
 		}
 	}
-	return strings.TrimSpace(b.String()), nil
+	return strings.TrimSpace(b.String()), statusButtons(), nil
 }
 
 func onOffText(on bool) string {

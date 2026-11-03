@@ -204,6 +204,30 @@ func (b *Bot) registerCommands() error {
 				{Type: discordgo.ApplicationCommandOptionSubCommand, Name: "list", Description: "查看定时任务"},
 				{
 					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "run",
+					Description: "立即试跑定时任务",
+					Options: []*discordgo.ApplicationCommandOption{
+						{Type: discordgo.ApplicationCommandOptionInteger, Name: "id", Description: "任务编号", Required: true},
+					},
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "pause",
+					Description: "暂停定时任务",
+					Options: []*discordgo.ApplicationCommandOption{
+						{Type: discordgo.ApplicationCommandOptionInteger, Name: "id", Description: "任务编号", Required: true},
+					},
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "resume",
+					Description: "恢复定时任务",
+					Options: []*discordgo.ApplicationCommandOption{
+						{Type: discordgo.ApplicationCommandOptionInteger, Name: "id", Description: "任务编号", Required: true},
+					},
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
 					Name:        "del",
 					Description: "删除定时任务",
 					Options: []*discordgo.ApplicationCommandOption{
@@ -265,7 +289,14 @@ func (b *Bot) onMessage(_ *discordgo.Session, m *discordgo.MessageCreate) {
 }
 
 func (b *Bot) onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i == nil || i.Type != discordgo.InteractionApplicationCommand {
+	if i == nil {
+		return
+	}
+	if i.Type == discordgo.InteractionMessageComponent {
+		b.onComponentInteraction(s, i)
+		return
+	}
+	if i.Type != discordgo.InteractionApplicationCommand {
 		return
 	}
 	if i.GuildID != "" {
@@ -486,6 +517,8 @@ func subcommandText(data discordgo.ApplicationCommandInteractionData) string {
 		return base + " " + sub.Name + " " + values["name"]
 	case data.Name == "task" && sub.Name == "add":
 		return base + " " + values["text"]
+	case data.Name == "task" && (sub.Name == "run" || sub.Name == "pause" || sub.Name == "resume" || sub.Name == "skip"):
+		return base + " " + sub.Name + " " + values["id"]
 	case data.Name == "memory" && sub.Name == "add":
 		return base + " add " + values["text"]
 	case (data.Name == "task" || data.Name == "memory" || data.Name == "sessions" || data.Name == "mcp") && sub.Name == "list":
