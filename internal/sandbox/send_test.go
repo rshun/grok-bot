@@ -152,6 +152,40 @@ func TestCheckSendableRefusesDataDir(t *testing.T) {
 			t.Fatalf("%s: openable for sending", rel)
 		}
 	}
+
+	// MediaDir inside DataDir is sendable for regular media files, while denied patterns inside MediaDir remain blocked.
+	p.MediaDir = filepath.Join(p.DataDir, "media")
+	mp3 := filepath.Join(p.MediaDir, "hello_en-US.mp3")
+	writeFile(t, mp3, "ID3data")
+	if _, _, err := p.CheckSendable(mp3); err != nil {
+		t.Fatalf("MediaDir mp3 rejected: %v", err)
+	}
+	f, _, err := p.OpenSendable(mp3)
+	if err != nil {
+		t.Fatalf("OpenSendable MediaDir mp3 rejected: %v", err)
+	}
+	f.Close()
+
+	badPem := filepath.Join(p.MediaDir, "key.pem")
+	writeFile(t, badPem, "PLACEHOLDER")
+	if _, _, err := p.CheckSendable(badPem); err == nil {
+		t.Fatal("pem file inside MediaDir should remain denied")
+	}
+
+	// CheckGeneratedMedia allows MediaDir and .grok/sessions/**/images/*, and rejects arbitrary host files.
+	sessImg := filepath.Join(p.Home, ".grok", "sessions", "ws", "sess-1", "images", "1.jpg")
+	writeFile(t, sessImg, "jpegbytes")
+	if _, _, err := p.CheckGeneratedMedia(sessImg); err != nil {
+		t.Fatalf("session image rejected by CheckGeneratedMedia: %v", err)
+	}
+	if _, _, err := p.CheckGeneratedMedia(mp3); err != nil {
+		t.Fatalf("media dir file rejected by CheckGeneratedMedia: %v", err)
+	}
+	otherHostFile := filepath.Join(t.TempDir(), "notes.txt")
+	writeFile(t, otherHostFile, "secret-notes")
+	if _, _, err := p.CheckGeneratedMedia(otherHostFile); err == nil {
+		t.Fatal("arbitrary host file accepted by CheckGeneratedMedia")
+	}
 }
 
 func TestCheckSendableRefusesKernelFiles(t *testing.T) {

@@ -41,6 +41,8 @@ type HeadlessResult struct {
 	StopReason string
 	// Structured is the --json-schema result, when grok returns one.
 	Structured json.RawMessage
+	// GeneratedImages holds absolute image paths returned by image_gen / image_edit during the turn.
+	GeneratedImages []string
 }
 
 type optionalFloat struct {

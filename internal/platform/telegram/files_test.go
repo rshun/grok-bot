@@ -144,6 +144,32 @@ func TestSendFilePhotoFailureFallsBackToDocument(t *testing.T) {
 	}
 }
 
+func TestSendFileAudioAndFallbackToDocument(t *testing.T) {
+	var requests []fileRequest
+	b := fileBot(t, &requests, nil)
+	opens := 0
+	if err := b.SendFile(context.Background(), "9", "17", platform.OutFile{Name: "schedule_en-US.mp3", Caption: "/ˈskɛdʒuːl/", Open: memFile("mp3data", 7, &opens)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 1 || requests[0].method != "sendAudio" || requests[0].field != "audio" || requests[0].titleOrEmpty() != "schedule_en-US" {
+		t.Fatalf("audio request: %+v", requests)
+	}
+
+	requests = nil
+	opens = 0
+	bFail := fileBot(t, &requests, func(method string) bool { return method == "sendAudio" })
+	if err := bFail.SendFile(context.Background(), "9", "17", platform.OutFile{Name: "word.mp3", Open: memFile("mp3data", 7, &opens)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 2 || requests[0].method != "sendAudio" || requests[1].method != "sendDocument" || opens != 2 {
+		t.Fatalf("audio fallback: opens=%d requests=%+v", opens, requests)
+	}
+}
+
+func (r fileRequest) titleOrEmpty() string {
+	return r.form["title"]
+}
+
 func TestSendFileReportsOpenAndSendFailures(t *testing.T) {
 	var requests []fileRequest
 	b := fileBot(t, &requests, func(string) bool { return true })

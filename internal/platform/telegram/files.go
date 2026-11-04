@@ -61,6 +61,22 @@ func (b *Bot) SendFile(ctx context.Context, chatID, replyTo string, f platform.O
 		if body, _, err = f.Open(); err != nil {
 			return err
 		}
+	} else if isAudio(f.Name) {
+		cfg := tgbotapi.NewAudio(id, tgbotapi.FileReader{Name: f.Name, Reader: body})
+		cfg.Caption, cfg.ReplyToMessageID, cfg.AllowSendingWithoutReply = f.Caption, reply, true
+		cfg.Title = strings.TrimSuffix(f.Name, filepath.Ext(f.Name))
+		_, err := b.api.Send(cfg)
+		body.Close()
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		slog.Warn("sendAudio failed, sending as document", "chat", chatID)
+		if body, _, err = f.Open(); err != nil {
+			return err
+		}
 	}
 	return b.sendDocument(id, reply, f, body)
 }
@@ -77,6 +93,15 @@ func (b *Bot) sendDocument(chatID int64, reply int, f platform.OutFile, body io.
 func isPhoto(name string) bool {
 	switch strings.ToLower(filepath.Ext(name)) {
 	case ".jpg", ".jpeg", ".png", ".gif", ".webp":
+		return true
+	}
+	return false
+}
+
+// isAudio reports whether the name is an audio file best rendered inline via sendAudio.
+func isAudio(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".mp3", ".m4a", ".wav", ".ogg", ".flac":
 		return true
 	}
 	return false

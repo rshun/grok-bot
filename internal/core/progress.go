@@ -23,7 +23,7 @@ const (
 )
 
 // progressKeys are the tool input fields that carry something worth showing, in priority order.
-var progressKeys = []string{"command", "query", "url", "target_file", "path", "target_directory", "file_path", "tool_name"}
+var progressKeys = []string{"command", "query", "prompt", "text", "url", "target_file", "path", "target_directory", "file_path", "tool_name"}
 
 // progressText turns a tool call into one short status line.
 func progressText(t grok.ToolUse) string {
@@ -33,6 +33,10 @@ func progressText(t grok.ToolUse) string {
 		label = "正在搜索"
 	case "web_fetch":
 		label = "正在打开网页"
+	case "image_gen":
+		label = "正在生成图片"
+	case "image_edit":
+		label = "正在修改图片"
 	case "read_file", "list_dir", "grep":
 		label = "正在读取"
 	case "write", "search_replace":
@@ -40,6 +44,9 @@ func progressText(t grok.ToolUse) string {
 	case "run_terminal_cmd", "run_terminal_command":
 		label = "正在执行命令"
 	case "use_tool":
+		if special := mcpProgressText(t.Input); special != "" {
+			return special
+		}
 		label = "正在调用工具"
 	case "search_tool":
 		return "正在查找工具"
@@ -47,6 +54,26 @@ func progressText(t grok.ToolUse) string {
 		return withDetail("正在处理", oneLine(t.Name))
 	}
 	return withDetail(label, toolDetail(t.Input))
+}
+
+func mcpProgressText(input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var call struct {
+		ToolName  string          `json:"tool_name"`
+		ToolInput json.RawMessage `json:"tool_input"`
+	}
+	if json.Unmarshal(input, &call) != nil {
+		return ""
+	}
+	switch call.ToolName {
+	case "grokbot__pronounce":
+		return withDetail("正在合成标准读音", toolDetail(call.ToolInput))
+	case "grokbot__send_web_image":
+		return "正在下载并校验图片"
+	}
+	return ""
 }
 
 func withDetail(label, detail string) string {

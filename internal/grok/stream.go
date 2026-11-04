@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -29,10 +31,20 @@ type streamLine struct {
 }
 
 type streamBlock struct {
-	Type  string          `json:"type"`
-	Text  string          `json:"text"`
-	Name  string          `json:"name"`
-	Input json.RawMessage `json:"input"`
+	Type      string          `json:"type"`
+	ID        string          `json:"id"`
+	ToolUseID string          `json:"tool_use_id"`
+	IsError   bool            `json:"is_error"`
+	Text      string          `json:"text"`
+	Name      string          `json:"name"`
+	Input     json.RawMessage `json:"input"`
+	Content   json.RawMessage `json:"content"`
+}
+
+type streamState struct {
+	lastText     string
+	imageToolIDs map[string]bool
+	genImages    []string
 }
 
 // ParseStream reads --output-format streaming-messages-json output, calling
@@ -40,10 +52,10 @@ type streamBlock struct {
 // onTool may be nil. A line longer than maxStreamLine is skipped, not fatal.
 func ParseStream(r io.Reader, onTool func(ToolUse)) (HeadlessResult, error) {
 	reader := bufio.NewReaderSize(r, 64<<10)
-	var lastText string
+	st := &streamState{imageToolIDs: map[string]bool{}}
 	for {
 		raw, readErr := readStreamLine(reader)
-		if result, done, err := parseStreamLine(strings.TrimSpace(string(raw)), onTool, &lastText); done {
+		if result, done, err := parseStreamLine(strings.TrimSpace(string(raw)), onTool, st); done {
 			return result, err
 		}
 		if readErr == io.EOF {
@@ -81,7 +93,7 @@ func readStreamLine(r *bufio.Reader) ([]byte, error) {
 }
 
 // parseStreamLine handles one stream line. done is true when the line ends the turn.
-func parseStreamLine(line string, onTool func(ToolUse), lastText *string) (result HeadlessResult, done bool, err error) {
+func parseStreamLine(line string, onTool func(ToolUse), st *streamState) (result HeadlessResult, done bool, err error) {
 	if line == "" || line[0] != '{' {
 		return HeadlessResult{}, false, nil
 	}
@@ -91,8 +103,12 @@ func parseStreamLine(line string, onTool func(ToolUse), lastText *string) (resul
 	}
 	switch msg.Type {
 	case "assistant":
-		if text := reportAssistantBlocks(msg.Message, onTool); text != "" && lastText != nil {
-			*lastText = text
+		if text := reportAssistantBlocks(msg.Message, onTool, st); text != "" && st != nil {
+			st.lastText = text
+		}
+	case "user":
+		if st != nil && len(st.imageToolIDs) > 0 {
+			collectImageToolResults(msg.Message, st)
 		}
 	case "error":
 		var detail string
@@ -102,6 +118,10 @@ func parseStreamLine(line string, onTool func(ToolUse), lastText *string) (resul
 		}
 		return HeadlessResult{}, true, &RunError{Message: detail}
 	case "result":
+		var genImages []string
+		if st != nil && len(st.genImages) > 0 {
+			genImages = append([]string(nil), st.genImages...)
+		}
 		if msg.IsError || msg.Subtype != "success" {
 			runErr := &RunError{
 				Message:   resultFailure(msg),
@@ -110,21 +130,22 @@ func parseStreamLine(line string, onTool func(ToolUse), lastText *string) (resul
 			if msg.Subtype == "error_max_turns" || IsMaxTurns(runErr) {
 				if trimmed := strings.TrimSpace(msg.Result); trimmed != "" {
 					runErr.PartialText = trimmed
-				} else if lastText != nil && *lastText != "" {
-					runErr.PartialText = *lastText
+				} else if st != nil && st.lastText != "" {
+					runErr.PartialText = st.lastText
 				}
 			}
-			return HeadlessResult{SessionID: msg.SessionID}, true, runErr
+			return HeadlessResult{SessionID: msg.SessionID, GeneratedImages: genImages}, true, runErr
 		}
 		return HeadlessResult{
-			Text:      strings.TrimSpace(msg.Result),
-			SessionID: msg.SessionID,
+			Text:            strings.TrimSpace(msg.Result),
+			SessionID:       msg.SessionID,
+			GeneratedImages: genImages,
 		}, true, nil
 	}
 	return HeadlessResult{}, false, nil
 }
 
-func reportAssistantBlocks(raw json.RawMessage, onTool func(ToolUse)) string {
+func reportAssistantBlocks(raw json.RawMessage, onTool func(ToolUse), st *streamState) string {
 	var message struct {
 		Content []streamBlock `json:"content"`
 	}
@@ -138,12 +159,115 @@ func reportAssistantBlocks(raw json.RawMessage, onTool func(ToolUse)) string {
 				texts = append(texts, t)
 			}
 		}
-		// Web search arrives as server_tool_use; local and MCP tools as tool_use.
-		if onTool != nil && (block.Type == "tool_use" || block.Type == "server_tool_use") {
-			onTool(ToolUse{Name: block.Name, Input: block.Input})
+		if block.Type == "tool_use" || block.Type == "server_tool_use" {
+			if st != nil && block.ID != "" && (block.Name == "image_gen" || block.Name == "image_edit") {
+				st.imageToolIDs[block.ID] = true
+			}
+			// Web search arrives as server_tool_use; local and MCP tools as tool_use.
+			if onTool != nil {
+				onTool(ToolUse{Name: block.Name, Input: block.Input})
+			}
 		}
 	}
 	return strings.Join(texts, "\n\n")
+}
+
+var reAbsImagePath = regexp.MustCompile(`(?i)((?:[A-Za-z]:[\\/]|/)[^\r\n"'<>|?*]+?\.(?:jpg|jpeg|png|webp|gif))`)
+
+func collectImageToolResults(raw json.RawMessage, st *streamState) {
+	var message struct {
+		Content []streamBlock `json:"content"`
+	}
+	if json.Unmarshal(raw, &message) != nil {
+		return
+	}
+	for _, block := range message.Content {
+		if block.Type != "tool_result" || block.IsError || !st.imageToolIDs[block.ToolUseID] {
+			continue
+		}
+		for _, text := range extractToolResultTexts(block.Content) {
+			for _, candidate := range extractImagePaths(text) {
+				if !containsString(st.genImages, candidate) {
+					st.genImages = append(st.genImages, candidate)
+				}
+			}
+		}
+	}
+}
+
+func extractToolResultTexts(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var single string
+	if json.Unmarshal(raw, &single) == nil && single != "" {
+		return []string{single}
+	}
+	var items []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &items) == nil {
+		var out []string
+		for _, item := range items {
+			if item.Text != "" {
+				out = append(out, item.Text)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+func extractImagePaths(text string) []string {
+	var out []string
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if isLikelyImagePath(trimmed) {
+			out = append(out, trimmed)
+			continue
+		}
+		for _, m := range reAbsImagePath.FindAllString(trimmed, -1) {
+			if isLikelyImagePath(m) {
+				out = append(out, m)
+			}
+		}
+	}
+	return out
+}
+
+func isLikelyImagePath(p string) bool {
+	if p == "" || !isCrossPlatformAbsPath(p) {
+		return false
+	}
+	dot := strings.LastIndexByte(p, '.')
+	if dot < 0 {
+		return false
+	}
+	switch strings.ToLower(p[dot:]) {
+	case ".jpg", ".jpeg", ".png", ".webp", ".gif":
+		return true
+	}
+	return false
+}
+
+func isCrossPlatformAbsPath(p string) bool {
+	if filepath.IsAbs(p) || strings.HasPrefix(p, "/") {
+		return true
+	}
+	return len(p) >= 3 &&
+		((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) &&
+		p[1] == ':' &&
+		(p[2] == '\\' || p[2] == '/')
+}
+
+func containsString(list []string, s string) bool {
+	for _, item := range list {
+		if item == s {
+			return true
+		}
+	}
+	return false
 }
 
 func resultFailure(msg streamLine) string {

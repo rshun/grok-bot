@@ -188,3 +188,28 @@ func TestParseStreamMaxTurnsKeepsPartialTextAndSession(t *testing.T) {
 		t.Fatalf("unexpected user facing text: %q", facing)
 	}
 }
+
+func TestParseStreamCollectsGeneratedImages(t *testing.T) {
+	stream := strings.Join([]string{
+		streamInit,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"img_1","name":"image_gen","input":{"prompt":"sunset mountain","aspect_ratio":"2:3"}}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"img_1","content":"/home/grok/.grok/sessions/ws/sess-1/images/1.jpg"}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"img_2","name":"image_edit","input":{"prompt":"warmer sky"}}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"img_2","content":[{"type":"text","text":"Saved image to C:\\Users\\grok\\.grok\\sessions\\ws\\sess-1\\images\\2.png"}]}]}}`,
+		`{"type":"result","subtype":"success","is_error":false,"result":"已生成图片。","session_id":"sess-1"}`,
+	}, "\n") + "\n"
+
+	res, err := ParseStream(strings.NewReader(stream), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.GeneratedImages) != 2 {
+		t.Fatalf("GeneratedImages = %v, want 2 paths", res.GeneratedImages)
+	}
+	if res.GeneratedImages[0] != "/home/grok/.grok/sessions/ws/sess-1/images/1.jpg" {
+		t.Fatalf("first image path = %q", res.GeneratedImages[0])
+	}
+	if !strings.HasSuffix(res.GeneratedImages[1], `images\2.png`) {
+		t.Fatalf("second image path = %q", res.GeneratedImages[1])
+	}
+}

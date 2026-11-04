@@ -39,9 +39,18 @@ func (s *Service) beginTurn(in platform.Inbound, out platform.Replier, fileTools
 			return err
 		}
 	}
-	// Only a turn with file tools may send files, and only to the chat it came from.
-	if sender, ok := out.(platform.FileSender); ok && fileTools && s.Sandbox != nil {
-		turn.CheckFile = checkFile(s.Sandbox.Policy, sender.FileLimit())
+	// Only a turn with file tools may send arbitrary allowed files; managed pronunciation and web
+	// image tools write into MediaDir and are available whenever MediaDir is configured.
+	if sender, ok := out.(platform.FileSender); ok {
+		limit := sender.FileLimit()
+		if fileTools && s.Sandbox != nil {
+			policy, _ := s.effectivePolicy()
+			turn.CheckFile = checkFile(policy, limit)
+		}
+		if s.MediaDir != "" {
+			turn.Pronounce = s.pronounceCallback(limit)
+			turn.FetchWebImage = s.fetchWebImageCallback(limit)
+		}
 	}
 	env, end := s.Actions.Begin(turn)
 	return turn, []string{env}, end
@@ -55,6 +64,8 @@ func withTurn(opts grok.ReplyOptions, turn *actions.Turn, env []string) grok.Rep
 	opts.Actions = true
 	opts.React = turn.React != nil
 	opts.SendFile = turn.CheckFile != nil
+	opts.Pronounce = turn.Pronounce != nil
+	opts.SendWebImage = turn.FetchWebImage != nil
 	opts.Env = env
 	return opts
 }
@@ -94,13 +105,17 @@ func (s *Service) flushFiles(ctx context.Context, out platform.Replier, chatID, 
 			return
 		}
 		path := f.Path
+		if allowed, reason := s.auditImageBeforeSend(ctx, path, f.Name); !allowed {
+			s.send(ctx, out, chatID, reason)
+			continue
+		}
 		file := platform.OutFile{
 			Name:    f.Name,
 			Caption: clipCaption(f.Caption),
 			// Every open checks the file again on the descriptor it returns, so the bytes
 			// sent are the bytes that passed the check, whatever happened to the path since.
 			Open: func() (io.ReadCloser, int64, error) {
-				r, size, err := s.Sandbox.Policy.OpenSendable(path)
+				r, size, err := s.openSendableFile(path)
 				if err != nil {
 					return nil, 0, err
 				}

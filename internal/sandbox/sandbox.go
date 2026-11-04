@@ -40,9 +40,12 @@ func BwrapAvailable() bool {
 var systemPaths = []string{"/etc", "/proc", "/sys", "/dev", "/boot", "/root"}
 
 // Policy holds the paths that must stay out of Grok's reach.
+// MediaDir is an optional bot-managed subdirectory (e.g. <DATA_DIR>/media) whose regular
+// media files may be sent to chats while keeping the rest of DataDir (bot.db, inbox, workspace) sealed.
 type Policy struct {
 	Home     string
 	DataDir  string
+	MediaDir string
 	EnvFile  string
 	AuthPath string
 }
@@ -146,13 +149,26 @@ func Render(readWrite []string, p Policy) string {
 // render leaves out the deny list when grok cannot enforce it; grok refuses
 // to start a profile whose deny list it cannot apply.
 func render(readWrite []string, p Policy, withDeny bool) string {
+	rw := append([]string(nil), readWrite...)
+	if p.MediaDir != "" {
+		found := false
+		for _, item := range rw {
+			if item == p.MediaDir {
+				found = true
+				break
+			}
+		}
+		if !found {
+			rw = append(rw, p.MediaDir)
+		}
+	}
 	var b strings.Builder
 	b.WriteString(marker + "\n")
 	b.WriteString("[profiles." + ProfileName + "]\n")
 	b.WriteString("extends = \"read-only\"\n")
 	// MCP servers run as child processes and still need the network.
 	b.WriteString("restrict_network = false\n")
-	b.WriteString("read_write = " + tomlList(readWrite) + "\n")
+	b.WriteString("read_write = " + tomlList(rw) + "\n")
 	if withDeny {
 		b.WriteString("deny = " + tomlList(p.Deny()) + "\n")
 	}

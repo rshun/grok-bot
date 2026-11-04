@@ -138,6 +138,10 @@ func TestRender(t *testing.T) {
 	if empty := Render(nil, p); !strings.Contains(empty, "read_write = []") {
 		t.Fatalf("empty list:\n%s", empty)
 	}
+	p.MediaDir = "/var/lib/bot/media"
+	if withMedia := Render([]string{"/srv/out", "/var/lib/bot/media"}, p); !strings.Contains(withMedia, `read_write = ["/srv/out", "/var/lib/bot/media"]`) {
+		t.Fatalf("media dir should be appended once:\n%s", withMedia)
+	}
 }
 
 // tomlPath quotes a path the way it must appear in the profile on this OS.

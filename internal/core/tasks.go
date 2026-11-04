@@ -9,10 +9,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/rshun/grok-bot/internal/actions"
 	"github.com/rshun/grok-bot/internal/grok"
+	"github.com/rshun/grok-bot/internal/media"
 	"github.com/rshun/grok-bot/internal/platform"
 	"github.com/rshun/grok-bot/internal/schedule"
 	"github.com/rshun/grok-bot/internal/store"
@@ -653,13 +655,16 @@ func (s *Service) runTaskWithProgress(ctx context.Context, in platform.Inbound, 
 	if err != nil {
 		return header + "\n\n" + grok.UserFacing(err), nil
 	}
+	var unsafeMedia atomic.Bool
+	imageGen := s.canGenerateImages(out)
 	opts := grok.ReplyOptions{
 		SessionID:  sessionID,
 		NewSession: true,
 		Model:      chat.Model,
 		Prompt:     t.Prompt,
 		WebSearch:  s.WebSearch,
-		OnTool:     onTool,
+		ImageGen:   imageGen,
+		OnTool:     wrapToolSafetyMonitor(onTool, imageGen, &unsafeMedia),
 		Memories:   s.chatMemories(ctx, t.Platform, t.ChatID),
 	}
 	_ = s.newSessionOptions(ctx, &opts)
@@ -679,10 +684,23 @@ func (s *Service) runTaskWithProgress(ctx context.Context, in platform.Inbound, 
 	if turn != nil {
 		files = turn.Files()
 	}
-	if strings.TrimSpace(result.Text) == "" {
+	text := result.Text
+	if len(result.GeneratedImages) > 0 {
+		text = cleanLocalImageRefs(text)
+	}
+	if unsafeMedia.Load() {
+		return header + "\n\n" + media.ErrUnsafeMedia.Error(), nil
+	}
+	if len(result.GeneratedImages) > 0 {
+		files = s.appendGeneratedImages(files, result.GeneratedImages, out)
+	}
+	if strings.TrimSpace(text) == "" {
+		if len(files) > 0 {
+			return header + "\n\n" + mediaDeliveredFallback, files
+		}
 		return header + "\n\n" + emptyReplyText, files
 	}
-	return header + "\n\n" + result.Text, files
+	return header + "\n\n" + text, files
 }
 
 func taskHeader(t store.Task) string {

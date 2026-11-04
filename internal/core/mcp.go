@@ -86,6 +86,7 @@ func (s *Service) statusCommand(ctx context.Context, in platform.Inbound) (strin
 	fmt.Fprintf(&b, "- 当前会话：%s（共保存 %d 个跨平台历史会话）\n", sessionDesc, len(sessions))
 	fmt.Fprintf(&b, "- 联网搜索：%s\n", onOffText(s.WebSearch))
 	fmt.Fprintf(&b, "- 外链预处理：%s\n", onOffText(!s.DisableLinkPrefetch))
+	fmt.Fprintf(&b, "- 语音发音与多模态配图：%s\n", onOffText(s.Actions != nil && (s.MediaDir != "" || s.Sandbox != nil)))
 	fmt.Fprintf(&b, "- 命令执行：%s\n", onOffText(s.shellEnabled(ctx)))
 	fmt.Fprintf(&b, "- 可写目录：%d 个\n", len(rwDirs))
 	fmt.Fprintf(&b, "- 长期记忆：%d 条（TG / Discord 同步，/reset 后保留）\n", len(memories))

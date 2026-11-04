@@ -6,13 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rshun/grok-bot/internal/actions"
 	"github.com/rshun/grok-bot/internal/grok"
+	"github.com/rshun/grok-bot/internal/media"
 	"github.com/rshun/grok-bot/internal/platform"
 	"github.com/rshun/grok-bot/internal/sandbox"
 	"github.com/rshun/grok-bot/internal/schedule"
@@ -47,6 +50,15 @@ type Service struct {
 	AllowShell bool
 	// UploadDir is where user-uploaded document attachments are saved for Grok to inspect.
 	UploadDir string
+	// MediaDir is the bot-managed directory (<DATA_DIR>/media) for standard pronunciation audio and downloaded web images.
+	MediaDir string
+	// Synthesizer overrides the default pronunciation synthesizer when non-nil (primarily for testing).
+	Synthesizer *media.Synthesizer
+	// MediaHTTP overrides the SSRF-safe HTTP client used for pronunciation and web image fetches when non-nil.
+	MediaHTTP *http.Client
+	// ImageAuditor is the post-generation / pre-send visual compliance review hook.
+	// Defaults to media.NoopImageAuditor{} placeholder when nil.
+	ImageAuditor media.ImageAuditor
 	// Sandbox limits file access for new sessions; nil turns file tools off.
 	Sandbox *sandbox.Manager
 	// Actions is the local MCP server for per-turn chat actions; nil means no MCP channel.
@@ -329,6 +341,11 @@ func (s *Service) answerWithButtons(ctx context.Context, in platform.Inbound, ou
 		text, files, buttons, err = s.command(ctx, in, out, cmd, arg, onTool)
 		return text, false, files, buttons, err
 	}
+	if media.HasImageRequestIntent(in.Text) {
+		if safetyErr := media.CheckPromptSafety(in.Text); safetyErr != nil {
+			return safetyErr.Error(), false, nil, nil, nil
+		}
+	}
 	uploaded, fileFailure := s.saveUploads(ctx, in)
 	if fileFailure != "" {
 		return fileFailure, false, nil, nil, nil
@@ -478,7 +495,11 @@ func (s *Service) chat(ctx context.Context, in platform.Inbound, out platform.Re
 	}
 	reply = res.text
 	if empty {
-		reply = emptyReplyText
+		if len(res.files) > 0 {
+			reply = mediaDeliveredFallback
+		} else {
+			reply = emptyReplyText
+		}
 	}
 	if res.rebuilt {
 		reply = rebuiltNotice + "\n\n" + reply
@@ -529,6 +550,7 @@ func (s *Service) chatTurn(ctx context.Context, in platform.Inbound, out platfor
 		Model:     chat.Model,
 		Prompt:    prompt,
 		WebSearch: s.WebSearch,
+		ImageGen:  s.canGenerateImages(out),
 		OnTool:    onTool,
 		Images:    images,
 		Memories:  s.chatMemories(ctx, in.Platform, in.ChatID),
@@ -621,15 +643,27 @@ type replyResult struct {
 func (s *Service) reply(ctx context.Context, in platform.Inbound, out platform.Replier, opts grok.ReplyOptions) (replyResult, error) {
 	turn, env, end := s.beginTurn(in, out, opts.FileTools || opts.ShellTools)
 	defer end()
+	var unsafeMedia atomic.Bool
+	opts.OnTool = wrapToolSafetyMonitor(opts.OnTool, opts.ImageGen, &unsafeMedia)
 	result, err := s.Engine.Reply(ctx, withTurn(opts, turn, env))
 	sessionID := result.SessionID
 	if sessionID == "" {
 		sessionID = opts.SessionID
 	}
-	res := replyResult{chatResult: chatResult{text: result.Text}, sessionID: sessionID}
+	text := result.Text
+	if len(result.GeneratedImages) > 0 {
+		text = cleanLocalImageRefs(text)
+	}
+	res := replyResult{chatResult: chatResult{text: text}, sessionID: sessionID}
 	if turn != nil {
 		res.reacted = turn.Reacted()
 		res.files = turn.Files()
+	}
+	if unsafeMedia.Load() {
+		res.files = nil
+		res.text = media.ErrUnsafeMedia.Error()
+	} else if len(result.GeneratedImages) > 0 {
+		res.files = s.appendGeneratedImages(res.files, result.GeneratedImages, out)
 	}
 	if err != nil {
 		return res, err
@@ -711,7 +745,7 @@ func stopReplyText(running bool, queued int) string {
 }
 
 func helpText(version string) string {
-	text := `直接发文字、图片、文件或网页链接，我会接着当前平台的上下文回复；引用任意消息回复时会自动带上被引用内容，消息中的 GitHub / X / 网页链接会自动安全抓取摘要。
+	text := `直接发文字、图片、文件或网页链接，我会接着当前平台的上下文回复；支持询问单词/句子标准发音（附可播放语音条），支持 AI 生成或联网查找移动端适配图片（严格拦截违规内容）；引用任意消息回复时会自动带上被引用内容，消息中的 GitHub / X / 网页链接会自动安全抓取摘要。
 
 /status
     查看运行状态、权限开关与 MCP 列表概览（附快捷按钮）

@@ -130,6 +130,22 @@ func TestReplyArgsWebSearch(t *testing.T) {
 	if !strings.Contains(argValue(t, shellArgs, "--system-prompt-override"), "run_terminal_cmd") {
 		t.Fatal("system prompt does not mention run_terminal_cmd")
 	}
+
+	withMedia := base
+	withMedia.ImageGen = true
+	withMedia.Pronounce = true
+	withMedia.SendWebImage = true
+	mediaArgs := replyArgs("/ws", withMedia)
+	tools = argValue(t, mediaArgs, "--disallowed-tools")
+	if hasTool(tools, "image_gen") || hasTool(tools, "image_edit") {
+		t.Fatalf("image_gen/image_edit still disallowed when ImageGen=true: %s", tools)
+	}
+	mediaPrompt := argValue(t, mediaArgs, "--system-prompt-override")
+	for _, want := range []string{"grokbot__pronounce", "image_gen", "2:3", "grokbot__send_web_image"} {
+		if !strings.Contains(mediaPrompt, want) {
+			t.Fatalf("missing %q in media system prompt: %s", want, mediaPrompt)
+		}
+	}
 }
 
 var wantFileTools = []string{"read_file", "list_dir", "grep", "search_replace", "write"}
