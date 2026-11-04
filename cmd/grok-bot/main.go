@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"github.com/rshun/grok-bot/internal/actions"
 	"github.com/rshun/grok-bot/internal/config"
@@ -46,6 +46,22 @@ func main() {
 	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	var taskLogFile *os.File
+	if inv.Mode == modeRunTask && inv.DataDir != "" {
+		taskLogFile = attachTaskSchedulerLog(inv.DataDir)
+		if taskLogFile != nil {
+			defer taskLogFile.Close()
+		}
+	}
+	if inv.EnvFile != "" {
+		if resolved := config.LoadEnvFile(inv.EnvFile); resolved != "" {
+			_ = os.Setenv("BOT_ENV_FILE", resolved)
+		}
+	}
+	if inv.DataDir != "" {
+		_ = os.Setenv("DATA_DIR", inv.DataDir)
+	}
+
 	exeDirs := executableDirs()
 	var loadedEnv string
 	if os.Getenv("TELEGRAM_BOT_TOKEN") == "" && os.Getenv("DISCORD_BOT_TOKEN") == "" {
@@ -60,7 +76,9 @@ func main() {
 		os.Exit(1)
 	}
 	cfg.Version = version
-	if os.Getenv("DATA_DIR") == "" {
+	if inv.DataDir != "" {
+		cfg.DataDir = inv.DataDir
+	} else if os.Getenv("DATA_DIR") == "" {
 		cfg.DataDir = resolveDataDir(cfg.DataDir, loadedEnv, exeDirs)
 	}
 	home, err := os.UserHomeDir()
@@ -72,6 +90,16 @@ func main() {
 	if err != nil {
 		slog.Error("data dir", "err", err)
 		os.Exit(1)
+	}
+	if inv.Mode == modeRunTask && taskLogFile == nil {
+		taskLogFile = attachTaskSchedulerLog(dataDir)
+		if taskLogFile != nil {
+			defer taskLogFile.Close()
+		}
+	}
+	activeEnvFile := resolveActiveEnvFile(loadedEnv, inv.EnvFile, cfg.EnvFile, exeDirs)
+	if activeEnvFile != "" {
+		cfg.EnvFile = activeEnvFile
 	}
 	policy := sandbox.Policy{
 		Home:     home,
@@ -162,6 +190,10 @@ func main() {
 	if actionsForSvc != nil {
 		defer actionsForSvc.Close()
 	}
+	schedBackend, schedInitErr := buildSystemScheduler(home, dataDir, activeEnvFile)
+	if schedInitErr != nil && !isTaskRun {
+		slog.Warn("os scheduler unavailable", "err", schedInitErr)
+	}
 	svc := &core.Service{
 		Actions:             actionsForSvc,
 		Store:               db,
@@ -179,7 +211,8 @@ func main() {
 		Location:            cfg.Location,
 		TaskLimit:           cfg.TaskLimit,
 		TaskMinInterval:     cfg.TaskMinInterval,
-		Crontab:             buildCrontab(cfg.EnvFile),
+		Scheduler:           schedBackend,
+		SchedulerInitErr:    schedInitErr,
 	}
 	type runner struct {
 		name string
@@ -187,6 +220,9 @@ func main() {
 	}
 	var runners []runner
 	logArgs := []any{"version", version}
+	if schedBackend != nil {
+		logArgs = append(logArgs, "scheduler", schedBackend.Name())
+	}
 	if cfg.TelegramToken != "" {
 		bot, err := telegram.New(cfg.TelegramToken)
 		if err != nil {
@@ -229,8 +265,8 @@ func main() {
 		}
 		return
 	}
+	svc.InitScheduler(ctx)
 	slog.Info("listening", logArgs...)
-	go svc.RunScheduler(ctx, 30*time.Second)
 	errCh := make(chan error, len(runners))
 	for _, item := range runners {
 		go func(item runner) {
@@ -304,19 +340,59 @@ func fileExists(path string) bool {
 	return err == nil && !info.IsDir()
 }
 
-func buildCrontab(envFile string) *schedule.Crontab {
+func resolveActiveEnvFile(loadedEnv, flagEnv, cfgEnv string, exeDirs []string) string {
+	candidates := []string{flagEnv, loadedEnv, os.Getenv("BOT_ENV_FILE"), cfgEnv}
+	candidates = append(candidates, envCandidatePaths("", exeDirs)...)
+	for _, p := range candidates {
+		if p != "" && fileExists(p) {
+			if abs, err := filepath.Abs(p); err == nil {
+				return abs
+			}
+			return p
+		}
+	}
+	return ""
+}
+
+func buildSystemScheduler(home, dataDir, envFile string) (schedule.Backend, error) {
 	exe, err := os.Executable()
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	if real, err := filepath.EvalSymlinks(exe); err == nil {
+	if real, err := filepath.EvalSymlinks(exe); err == nil && real != "" {
 		exe = real
 	}
 	wd, _ := os.Getwd()
-	if envFile != "" {
-		if _, err := os.Stat(envFile); err != nil {
-			envFile = ""
+	return schedule.NewSystemScheduler(schedule.SystemConfig{
+		BinPath: exe,
+		WorkDir: wd,
+		DataDir: dataDir,
+		EnvFile: envFile,
+		HomeDir: home,
+	})
+}
+
+func attachTaskSchedulerLog(dataDir string) *os.File {
+	if dataDir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dataDir, 0o750); err != nil {
+		return nil
+	}
+	logPath := filepath.Join(dataDir, "task-scheduler.log")
+	if info, err := os.Stat(logPath); err == nil && info.Size() >= 2<<20 {
+		_ = os.Rename(logPath, logPath+".1")
+	}
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil
+	}
+	if stderrInfo, sErr := os.Stderr.Stat(); sErr == nil {
+		if logInfo, lErr := f.Stat(); lErr == nil && os.SameFile(stderrInfo, logInfo) {
+			_ = f.Close()
+			return nil
 		}
 	}
-	return schedule.NewSystemCrontab(exe, wd, envFile)
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, f), nil)))
+	return f
 }

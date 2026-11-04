@@ -280,8 +280,9 @@ var skipShellVars = map[string]bool{
 }
 
 // LoadUserProfile loads unset environment variables (such as MCP auth tokens)
-// from ~/.bash_profile, ~/.bash_login, and ~/.profile so systemd and cron runs
-// inherit the same user environment as an interactive login shell.
+// from ~/.bash_profile, ~/.bash_login, ~/.profile (and ~/.zprofile static exports),
+// and ensures standard user/Homebrew bin directories are in PATH on Unix so
+// systemd, cron, and launchd runs inherit the same CLI tools as an interactive login shell.
 func LoadUserProfile(home string) {
 	home = strings.TrimSpace(home)
 	if home == "" {
@@ -292,6 +293,45 @@ func LoadUserProfile(home string) {
 		filepath.Join(home, ".bash_login"),
 		filepath.Join(home, ".profile"),
 	)
+	loadProfileStatic(filepath.Join(home, ".zprofile"))
+	if runtime.GOOS != "windows" {
+		ensureUnixPath(home)
+	}
+}
+
+func ensureUnixPath(home string) {
+	cur := os.Getenv("PATH")
+	seen := map[string]bool{}
+	var parts []string
+	for _, p := range strings.Split(cur, ":") {
+		p = strings.TrimSpace(p)
+		if p != "" && !seen[p] {
+			seen[p] = true
+			parts = append(parts, p)
+		}
+	}
+	candidates := []string{
+		filepath.Join(home, ".local", "bin"),
+		filepath.Join(home, ".bun", "bin"),
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+		"/usr/bin",
+		"/bin",
+	}
+	changed := false
+	for _, dir := range candidates {
+		if seen[dir] {
+			continue
+		}
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			seen[dir] = true
+			parts = append(parts, dir)
+			changed = true
+		}
+	}
+	if changed {
+		_ = os.Setenv("PATH", strings.Join(parts, ":"))
+	}
 }
 
 // LoadShellProfiles sources the given shell profile files via bash when available

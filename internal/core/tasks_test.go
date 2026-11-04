@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -547,5 +548,53 @@ func TestTaskRunNowAndUpdateSchedule(t *testing.T) {
 	got = rec.wait(t, 4)
 	if got[3] != "普通对话回复" || !strings.Contains(chatPrompt, "[当前聊天的定时任务列表]") || !strings.Contains(chatPrompt, "#2 每周一至周五 07:30：随机抽取10个单词") {
 		t.Fatalf("chat fallback got %q, prompt=%q", got[3], chatPrompt)
+	}
+}
+
+type fakeSchedulerBackend struct {
+	name    string
+	syncErr error
+	synced  [][]schedule.CronEntry
+}
+
+func (f *fakeSchedulerBackend) Name() string { return f.name }
+func (f *fakeSchedulerBackend) Sync(entries []schedule.CronEntry, _ *time.Location) error {
+	cp := append([]schedule.CronEntry(nil), entries...)
+	f.synced = append(f.synced, cp)
+	return f.syncErr
+}
+
+func TestInitSchedulerAndNativeSyncStatus(t *testing.T) {
+	ctx := context.Background()
+	svc, _, _ := taskService(t, dailyNews)
+	fb := &fakeSchedulerBackend{name: "macOS launchd (LaunchAgents)"}
+	svc.Scheduler = fb
+
+	// Pre-populate one active task and verify InitScheduler syncs it immediately without polling.
+	_ = addTask(t, svc, "9", dailyNews, "每天 09:00：看新闻", time.Date(2026, 10, 20, 9, 0, 0, 0, taskZone))
+	svc.InitScheduler(ctx)
+	if len(fb.synced) != 1 || len(fb.synced[0]) != 1 || fb.synced[0][0].ID != 1 {
+		t.Fatalf("InitScheduler did not sync task into backend: %#v", fb.synced)
+	}
+
+	// /status displays the OS native scheduler name.
+	rec := &recorder{}
+	say(svc, rec, "/status")
+	statusMsg := rec.wait(t, 1)[0]
+	if !strings.Contains(statusMsg, "macOS launchd (LaunchAgents)（系统原生触发）") {
+		t.Fatalf("/status missing native scheduler line:\n%s", statusMsg)
+	}
+
+	// When OS scheduler sync fails, /task and /status surface the warning instead of hiding it.
+	fb.syncErr = errors.New("permission denied")
+	say(svc, rec, "/task pause 1")
+	pauseReply := rec.wait(t, 2)[1]
+	if !strings.Contains(pauseReply, "已暂停 #1") || !strings.Contains(pauseReply, "⚠️ 同步到 macOS launchd (LaunchAgents) 失败") {
+		t.Fatalf("expected sync failure warning on /task pause, got:\n%s", pauseReply)
+	}
+	say(svc, rec, "/status")
+	statusWarn := rec.wait(t, 3)[2]
+	if !strings.Contains(statusWarn, "⚠️ permission denied") {
+		t.Fatalf("expected sync failure in /status, got:\n%s", statusWarn)
 	}
 }

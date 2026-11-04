@@ -90,6 +90,11 @@ func (s *Service) statusCommand(ctx context.Context, in platform.Inbound) (strin
 	fmt.Fprintf(&b, "- 可写目录：%d 个\n", len(rwDirs))
 	fmt.Fprintf(&b, "- 长期记忆：%d 条（TG / Discord 同步，/reset 后保留）\n", len(memories))
 	fmt.Fprintf(&b, "- 定时任务：%d 个运行中 / %d 个已暂停\n", activeTasks, pausedTasks)
+	if schedName, schedErr := s.schedulerStatus(); schedErr != nil {
+		fmt.Fprintf(&b, "- 系统调度器：%s（⚠️ %s）\n", schedName, grok.RedactSensitive(schedErr.Error()))
+	} else if schedName != "未配置" {
+		fmt.Fprintf(&b, "- 系统调度器：%s（系统原生触发）\n", schedName)
+	}
 
 	if mcpEng, ok := s.Engine.(MCPEngine); ok {
 		if mcpOut, mcpErr := mcpEng.MCPList(ctx); mcpErr == nil && mcpOut != "" {

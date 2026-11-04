@@ -103,8 +103,8 @@ func (s *Service) taskCommand(ctx context.Context, in platform.Inbound, out plat
 		if !removed {
 			return "没有这个任务。", nil, nil, nil
 		}
-		s.syncCrontab(ctx)
-		return fmt.Sprintf("已删除 #%d。", id), nil, nil, nil
+		warn := s.syncScheduler(ctx)
+		return fmt.Sprintf("已删除 #%d。", id) + warn, nil, nil, nil
 	case (fields[0] == "del" || fields[0] == "pause" || fields[0] == "resume" || fields[0] == "skip") && len(fields) == 1:
 		return taskUsage, nil, nil, nil
 	case fields[0] == "cron" && len(fields) >= 7:
@@ -227,8 +227,8 @@ func (s *Service) taskCreateWithProgress(ctx context.Context, in platform.Inboun
 	if err != nil {
 		return "", nil, err
 	}
-	s.syncCrontab(ctx)
-	return fmt.Sprintf("已创建 #%d：%s。下次执行：%s。", id, summary, next.In(s.location()).Format("01-02 15:04")), nil, nil
+	warn := s.syncScheduler(ctx)
+	return fmt.Sprintf("已创建 #%d：%s。下次执行：%s。", id, summary, next.In(s.location()).Format("01-02 15:04")) + warn, nil, nil
 }
 
 func (s *Service) taskManage(ctx context.Context, in platform.Inbound, out platform.Replier, existing []store.Task, parsed schedule.Parsed, now time.Time, onTool func(grok.ToolUse)) (string, []actions.File, error) {
@@ -288,14 +288,14 @@ func (s *Service) taskManage(ctx context.Context, in platform.Inbound, out platf
 		if err := s.Store.UpdateTask(ctx, target.ID, string(spec), prompt, summary, next); err != nil {
 			return "", nil, err
 		}
-		s.syncCrontab(ctx)
-		return fmt.Sprintf("已更新 #%d：%s。下次执行：%s。", target.ID, summary, next.In(s.location()).Format("01-02 15:04")), nil, nil
+		warn := s.syncScheduler(ctx)
+		return fmt.Sprintf("已更新 #%d：%s。下次执行：%s。", target.ID, summary, next.In(s.location()).Format("01-02 15:04")) + warn, nil, nil
 	case "delete":
 		if _, err := s.Store.DeleteTaskByID(ctx, target.ID); err != nil {
 			return "", nil, err
 		}
-		s.syncCrontab(ctx)
-		return fmt.Sprintf("已删除 #%d：%s。", target.ID, target.Summary), nil, nil
+		warn := s.syncScheduler(ctx)
+		return fmt.Sprintf("已删除 #%d：%s。", target.ID, target.Summary) + warn, nil, nil
 	case "pause":
 		if target.Paused {
 			return fmt.Sprintf("#%d（%s）已经处于暂停状态。", target.ID, target.Summary), nil, nil
@@ -303,8 +303,8 @@ func (s *Service) taskManage(ctx context.Context, in platform.Inbound, out platf
 		if err := s.Store.SetTaskPaused(ctx, target.ID, true, target.NextRun); err != nil {
 			return "", nil, err
 		}
-		s.syncCrontab(ctx)
-		return fmt.Sprintf("已暂停 #%d：%s。", target.ID, target.Summary), nil, nil
+		warn := s.syncScheduler(ctx)
+		return fmt.Sprintf("已暂停 #%d：%s。", target.ID, target.Summary) + warn, nil, nil
 	case "resume":
 		next, ok := taskNext(*target, now, s.location())
 		if !ok {
@@ -313,8 +313,8 @@ func (s *Service) taskManage(ctx context.Context, in platform.Inbound, out platf
 		if err := s.Store.SetTaskPaused(ctx, target.ID, false, next); err != nil {
 			return "", nil, err
 		}
-		s.syncCrontab(ctx)
-		return fmt.Sprintf("已恢复 #%d：%s。下次执行：%s。", target.ID, target.Summary, next.In(s.location()).Format("01-02 15:04")), nil, nil
+		warn := s.syncScheduler(ctx)
+		return fmt.Sprintf("已恢复 #%d：%s。下次执行：%s。", target.ID, target.Summary, next.In(s.location()).Format("01-02 15:04")) + warn, nil, nil
 	case "skip":
 		base := target.NextRun
 		if base.Before(now) {
@@ -326,14 +326,14 @@ func (s *Service) taskManage(ctx context.Context, in platform.Inbound, out platf
 			if _, err := s.Store.DeleteTaskByID(ctx, target.ID); err != nil {
 				return "", nil, err
 			}
-			s.syncCrontab(ctx)
-			return fmt.Sprintf("已取消 #%d（%s）原定 %s 的执行（无后续周期，任务已结束）。", target.ID, target.Summary, oldNext), nil, nil
+			warn := s.syncScheduler(ctx)
+			return fmt.Sprintf("已取消 #%d（%s）原定 %s 的执行（无后续周期，任务已结束）。", target.ID, target.Summary, oldNext) + warn, nil, nil
 		}
 		if err := s.Store.SetNextRun(ctx, target.ID, next); err != nil {
 			return "", nil, err
 		}
-		s.syncCrontab(ctx)
-		return fmt.Sprintf("已跳过 #%d（%s）原定 %s 的执行，下次执行顺延至：%s。", target.ID, target.Summary, oldNext, next.In(s.location()).Format("01-02 15:04")), nil, nil
+		warn := s.syncScheduler(ctx)
+		return fmt.Sprintf("已跳过 #%d（%s）原定 %s 的执行，下次执行顺延至：%s。", target.ID, target.Summary, oldNext, next.In(s.location()).Format("01-02 15:04")) + warn, nil, nil
 	}
 	return notUnderstood, nil, nil
 }
@@ -455,35 +455,61 @@ func looksLikeNaturalTask(text string, existing []store.Task) bool {
 	return false
 }
 
-// RunScheduler syncs tasks into system crontab when available; otherwise it runs
-// due tasks every interval until ctx is cancelled.
-func (s *Service) RunScheduler(ctx context.Context, every time.Duration) {
+// InitScheduler performs startup catch-up of tasks missed while offline and synchronizes
+// all active tasks into the host OS's native scheduler (Linux crontab, macOS launchd,
+// Windows Task Scheduler). Scheduled execution is triggered exclusively by the OS
+// scheduler (`grok-bot run-task <id>`), never by an in-process timer.
+func (s *Service) InitScheduler(ctx context.Context) {
 	s.catchUp(ctx)
-	s.syncCrontab(ctx)
-	if s.Crontab != nil {
-		<-ctx.Done()
-		return
-	}
-	ticker := time.NewTicker(every)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.runDue(ctx)
-		}
-	}
+	_ = s.syncScheduler(ctx)
 }
 
-func (s *Service) syncCrontab(ctx context.Context) {
-	if s.Crontab == nil {
-		return
+// RunScheduler syncs tasks into the host OS scheduler and blocks until ctx is cancelled,
+// without running any in-process polling timer.
+func (s *Service) RunScheduler(ctx context.Context, _ time.Duration) {
+	s.InitScheduler(ctx)
+	<-ctx.Done()
+}
+
+func (s *Service) scheduler() schedule.Backend {
+	if s.Scheduler != nil {
+		return s.Scheduler
+	}
+	if s.Crontab != nil {
+		return s.Crontab
+	}
+	return nil
+}
+
+func (s *Service) schedulerStatus() (string, error) {
+	b := s.scheduler()
+	s.mu.Lock()
+	syncErr := s.lastSchedErr
+	s.mu.Unlock()
+	if b == nil {
+		if s.SchedulerInitErr != nil {
+			return "未就绪", s.SchedulerInitErr
+		}
+		return "未配置", nil
+	}
+	if syncErr != nil {
+		return b.Name(), syncErr
+	}
+	return b.Name(), s.SchedulerInitErr
+}
+
+func (s *Service) syncScheduler(ctx context.Context) string {
+	b := s.scheduler()
+	if b == nil {
+		if s.SchedulerInitErr != nil {
+			return "\n⚠️ 系统调度器不可用（" + grok.RedactSensitive(s.SchedulerInitErr.Error()) + "），任务尚未注册到系统定时服务。"
+		}
+		return ""
 	}
 	tasks, err := s.Store.AllTasks(ctx)
 	if err != nil {
-		slog.Error("load tasks for crontab", "err", err)
-		return
+		slog.Error("load tasks for os scheduler", "scheduler", b.Name(), "err", err)
+		return ""
 	}
 	entries := make([]schedule.CronEntry, len(tasks))
 	for i, t := range tasks {
@@ -495,12 +521,18 @@ func (s *Service) syncCrontab(ctx context.Context) {
 			Paused:  t.Paused,
 		}
 	}
-	if err := s.Crontab.Sync(entries, s.location()); err != nil {
-		slog.Error("sync crontab", "err", err)
+	syncErr := b.Sync(entries, s.location())
+	s.mu.Lock()
+	s.lastSchedErr = syncErr
+	s.mu.Unlock()
+	if syncErr != nil {
+		slog.Error("sync os scheduler", "scheduler", b.Name(), "err", syncErr)
+		return "\n⚠️ 同步到 " + b.Name() + " 失败：" + grok.RedactSensitive(syncErr.Error())
 	}
+	return ""
 }
 
-// RunTaskByID executes a single scheduled task triggered by system crontab (`grok-bot run-task <id>`).
+// RunTaskByID executes a single scheduled task triggered by the host OS scheduler (`grok-bot run-task <id>`).
 func (s *Service) RunTaskByID(ctx context.Context, id int64) error {
 	t, ok, err := s.Store.TaskByID(ctx, id)
 	if err != nil {
@@ -525,14 +557,15 @@ func (s *Service) RunTaskByID(ctx context.Context, id int64) error {
 	if err != nil {
 		return err
 	}
-	s.syncCrontab(ctx)
 	primary, ok := s.primaryTaskTarget(ctx, t)
 	if !ok {
+		_ = s.syncScheduler(ctx)
 		return fmt.Errorf("no sender configured for task %d", t.ID)
 	}
 	in := platform.Inbound{Platform: primary.Platform, ChatID: primary.ChatID, UserID: t.UserID, Text: t.Prompt, TextMessage: true}
 	text, files := s.runTask(ctx, in, primary.Sender, t)
 	s.deliverTask(ctx, t, primary.Platform, primary.ChatID, primary.Sender, text, files)
+	_ = s.syncScheduler(ctx)
 	return nil
 }
 
@@ -704,8 +737,8 @@ func (s *Service) taskCreateRawCron(ctx context.Context, in platform.Inbound, cr
 	if err != nil {
 		return "", err
 	}
-	s.syncCrontab(ctx)
-	return fmt.Sprintf("已创建 #%d：%s。下次执行：%s。", id, summary, next.In(s.location()).Format("01-02 15:04")), nil
+	warn := s.syncScheduler(ctx)
+	return fmt.Sprintf("已创建 #%d：%s。下次执行：%s。", id, summary, next.In(s.location()).Format("01-02 15:04")) + warn, nil
 }
 
 type taskTarget struct {
