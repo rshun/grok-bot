@@ -38,6 +38,14 @@ const promptReact = " You can react to the user's message with one emoji using t
 
 const promptSendFile = " You can send a file to the user with the MCP tool grokbot__send_file; path must be absolute. When you send a file, also reply with one short line of text."
 
+const promptPronounce = " When the user asks how a word, phrase, or sentence is pronounced or read aloud, include clear phonetic notation (such as IPA) in your reply and call the MCP tool grokbot__pronounce (default lang \"en-US\" for English, \"en-GB\" when British pronunciation is requested, or the matching language code) so the user receives standard formal audio."
+
+const promptImageGen = " You can generate images with image_gen or edit images with image_edit; prefer mobile-friendly vertical aspect_ratio \"2:3\" (or \"9:16\" for phone wallpapers) unless the user asks for square or landscape. After image_gen or image_edit returns a saved image path, call grokbot__send_file with that exact absolute path so the image is sent to the chat, and never write local relative links like images/1.jpg in your reply text. Strictly refuse any pornographic/NSFW, gory/extremely violent, or illegal image generation or editing request."
+
+const promptImageGenAuto = " You can generate images with image_gen or edit images with image_edit; prefer mobile-friendly vertical aspect_ratio \"2:3\" (or \"9:16\" for phone wallpapers) unless the user asks for square or landscape. Generated images are automatically attached and sent to the chat; never write local relative links like images/1.jpg in your reply text. Strictly refuse any pornographic/NSFW, gory/extremely violent, or illegal image generation or editing request."
+
+const promptSendWebImage = " When the user wants an existing image from the web, you may find a direct http/https image URL and call the MCP tool grokbot__send_web_image to send a verified mobile-friendly photo (strictly refuse any NSFW, violent/gory, or illegal imagery)."
+
 const promptSchema = "Convert the user's scheduling request into JSON that matches the schema. Do not call tools."
 
 // webTools are opened when web search is enabled.
@@ -48,6 +56,9 @@ var fileTools = []string{"read_file", "list_dir", "grep", "search_replace", "wri
 
 // shellTools are opened when shell execution is enabled.
 var shellTools = []string{"run_terminal_cmd", "run_terminal_command"}
+
+// imageTools are opened when multimodal image generation/editing is enabled.
+var imageTools = []string{"image_gen", "image_edit"}
 
 // mcpTools are closed for structured-output calls, which must not call anything.
 var mcpTools = []string{"search_tool", "use_tool"}
@@ -130,6 +141,12 @@ type ReplyOptions struct {
 	React bool
 	// SendFile names the send_file tool in the system prompt.
 	SendFile bool
+	// Pronounce names the pronounce MCP tool in the system prompt.
+	Pronounce bool
+	// ImageGen opens Grok's native image_gen and image_edit tools and adds mobile/safety instructions.
+	ImageGen bool
+	// SendWebImage names the send_web_image MCP tool in the system prompt.
+	SendWebImage bool
 	// Images are sent together with Prompt; chat turns only.
 	Images []Image
 	// Memories are persistent user instructions injected into the system prompt on every turn.
@@ -159,7 +176,11 @@ func (c *Client) Reply(ctx context.Context, opts ReplyOptions) (HeadlessResult, 
 	// The prompt file holds the user's pictures, so it goes as soon as the grok process is over.
 	defer cleanup()
 	cmd := exec.CommandContext(ctx, c.Bin, args...)
-	cmd.Env = append(envWithoutUpdate(), opts.Env...)
+	env := envWithoutUpdate()
+	if opts.ImageGen && opts.JSONSchema == "" {
+		env = append(env, "GROK_IMAGE_GEN=1", "GROK_IMAGE_EDIT=1")
+	}
+	cmd.Env = append(env, opts.Env...)
 	cmd.Dir = c.Workspace
 	if opts.JSONSchema == "" {
 		return replyStream(ctx, cmd, opts)
@@ -353,6 +374,19 @@ func systemPromptFor(opts ReplyOptions) string {
 	if opts.SendFile {
 		prompt += promptSendFile
 	}
+	if opts.Pronounce {
+		prompt += promptPronounce
+	}
+	if opts.ImageGen {
+		if opts.SendFile {
+			prompt += promptImageGen
+		} else {
+			prompt += promptImageGenAuto
+		}
+	}
+	if opts.SendWebImage {
+		prompt += promptSendWebImage
+	}
 	switch {
 	case opts.FileTools && opts.ShellTools:
 		prompt += fmt.Sprintf(promptFilesAndShell, dirList(opts.WriteDirs))
@@ -414,6 +448,11 @@ func disallowedFor(opts ReplyOptions) string {
 	}
 	if opts.ShellTools {
 		for _, name := range shellTools {
+			open[name] = true
+		}
+	}
+	if opts.ImageGen {
+		for _, name := range imageTools {
 			open[name] = true
 		}
 	}

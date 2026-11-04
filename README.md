@@ -38,6 +38,20 @@ go test -mod=readonly ./...
 - `/task 一句话` 创建或管理定时任务（支持每天、每周、每月几号、月末最后一天、工作日、以及 `/task cron 分 时 日 月 周 指令` 直填 5 段 Cron 表达式）；`/task list` 查看（附一键试跑、暂停/恢复、删除按钮）；`/task run|pause|resume|skip|del 编号` 操作指定任务
 - `/help` 查看说明
 
+### 标准语音发音与多模态配图（`pronounce` / `image_gen` / `send_web_image`）
+
+无需额外配置付费语音或图床 API Key，直接用自然语言提问即可触发：
+
+- **标准正式读音（`grokbot__pronounce`）**：
+  - 询问单词、短语或句子怎么读（例如「entrepreneur 怎么读？」「对比 schedule 的英式和美式发音」「帮我朗读这句话」），Grok 会同时给出国际音标（IPA）/ 发音要点，并发送可直接内联点击播放的 `.mp3` 标准语音条（Telegram 走 `sendAudio` 播放条，Discord 走内联音频播放器）。
+  - 单个英文词优先拉取词典级真人播音员录音（匹配 `en-US` / `en-GB` 口音），短语、长句及多语种（中、英、日、韩、法、德、西等）自动切换标准播音级 TTS。
+- **AI 生图、改图与联网找图（`image_gen` / `image_edit` / `grokbot__send_web_image`）**：
+  - 原生接入 Grok 4.7 多模态 `image_gen` 与 `image_edit`，默认优先采用移动端友好的竖屏构图（`2:3` 海报插画或 `9:16` 手机壁纸，用户指定横屏或方形时按需调整），生成后自动作为原生图片发回聊天并清理本地相对路径引用。
+  - 需要现有网络图片时，通过 `grokbot__send_web_image` 走服务端 SSRF 安全客户端下载、校验真实图片魔数（JPG/PNG/WebP/GIF）与移动端清晰度尺寸，杜绝防盗链裂图或追踪像素。
+- **内容安全合规**：
+  - 严格拦截任何涉及淫秽色情、极端暴力血腥、恐怖主义及违法犯罪内容的生图与找图请求（内置请求前预审与工具流参数实时拦截）。
+  - 发图链路已预留 `media.ImageAuditor` 视觉合规终审接口占位（当前迭代默认使用 `NoopImageAuditor` 占位，便于后续无缝接入零上下文多模态画面终审）。
+
 ### 外链自动安全预抓取（`LINK_PREFETCH`）
 
 普通聊天消息中包含 `http://` 或 `https://` 链接时（最多自动提取前 3 条），bot 会在发给 Grok 之前自动做安全预抓取（内置严格 SSRF 防护，拒绝访问本机回环、局域网 RFC1918、CGNAT、Link-Local 等内网地址）：

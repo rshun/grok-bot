@@ -31,12 +31,13 @@ type File struct {
 	Size    int64
 }
 
-// Turn is the context of one grok run. A nil React or CheckFile means the
-// matching tool is not offered.
+// Turn is the context of one grok run. A nil callback means the matching tool is not offered.
 type Turn struct {
-	React     func(ctx context.Context, emoji string) error
-	CheckFile func(path string) (File, error)
-	MaxFiles  int // 0 means 10
+	React         func(ctx context.Context, emoji string) error
+	CheckFile     func(path string) (File, error)
+	Pronounce     func(ctx context.Context, text, lang string) (File, string, error)
+	FetchWebImage func(ctx context.Context, url, caption string) (File, error)
+	MaxFiles      int // 0 means 10
 
 	mu      sync.Mutex
 	reacted bool
@@ -299,6 +300,36 @@ func toolList(t *Turn) []map[string]any {
 			},
 		})
 	}
+	if t.Pronounce != nil {
+		tools = append(tools, map[string]any{
+			"name":        "pronounce",
+			"description": "Send standard, formal pronunciation audio (MP3) for a word, phrase, or sentence to the chat. Uses authoritative dictionary human audio for single English words when available and formal broadcast TTS otherwise.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"text": map[string]any{"type": "string", "description": "Plain word, phrase, or sentence to pronounce (no IPA slashes or markdown)."},
+					"lang": map[string]any{"type": "string", "description": "Optional BCP-47 language/accent code such as en-US (default for English), en-GB, zh-CN, ja-JP, ko-KR, fr-FR, de-DE, es-ES."},
+				},
+				"required":             []string{"text"},
+				"additionalProperties": false,
+			},
+		})
+	}
+	if t.FetchWebImage != nil {
+		tools = append(tools, map[string]any{
+			"name":        "send_web_image",
+			"description": "Safely download an image from a direct http/https image URL (JPG, PNG, WebP, GIF) and send it as a mobile-friendly photo to the chat. Never send NSFW, gory/violent, or illegal images.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"url":     map[string]any{"type": "string", "description": "Direct http/https URL of an image file."},
+					"caption": map[string]any{"type": "string", "description": "Optional short caption."},
+				},
+				"required":             []string{"url"},
+				"additionalProperties": false,
+			},
+		})
+	}
 	return tools
 }
 
@@ -351,6 +382,57 @@ func callTool(ctx context.Context, t *Turn, name string, args json.RawMessage) m
 		return toolResult("Queued "+file.Name+" for sending.", false)
 	case name == "send_file":
 		return toolResult("文件功能当前不可用。", true)
+	case name == "pronounce" && t.Pronounce != nil:
+		var in struct {
+			Text string `json:"text"`
+			Lang string `json:"lang"`
+		}
+		if err := json.Unmarshal(args, &in); err != nil || strings.TrimSpace(in.Text) == "" {
+			return toolResult("text is required", true)
+		}
+		if t.fileCount() >= t.maxFiles() {
+			return toolResult("too many files in this reply", true)
+		}
+		file, detail, err := t.Pronounce(ctx, in.Text, in.Lang)
+		if err != nil {
+			return toolResult(modelMessage(err, "could not generate pronunciation audio"), true)
+		}
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		if len(t.files) >= t.maxFiles() {
+			return toolResult("too many files in this reply", true)
+		}
+		t.files = append(t.files, file)
+		if detail != "" {
+			return toolResult(detail, false)
+		}
+		return toolResult("Queued pronunciation audio "+file.Name+" for sending.", false)
+	case name == "pronounce":
+		return toolResult("语音发音功能当前不可用。", true)
+	case name == "send_web_image" && t.FetchWebImage != nil:
+		var in struct {
+			URL     string `json:"url"`
+			Caption string `json:"caption"`
+		}
+		if err := json.Unmarshal(args, &in); err != nil || strings.TrimSpace(in.URL) == "" {
+			return toolResult("url is required", true)
+		}
+		if t.fileCount() >= t.maxFiles() {
+			return toolResult("too many files in this reply", true)
+		}
+		file, err := t.FetchWebImage(ctx, in.URL, in.Caption)
+		if err != nil {
+			return toolResult(modelMessage(err, "could not download web image"), true)
+		}
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		if len(t.files) >= t.maxFiles() {
+			return toolResult("too many files in this reply", true)
+		}
+		t.files = append(t.files, file)
+		return toolResult("Queued web image "+file.Name+" for sending.", false)
+	case name == "send_web_image":
+		return toolResult("网络图片发送功能当前不可用。", true)
 	default:
 		return toolResult("unknown tool", true)
 	}

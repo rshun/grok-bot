@@ -366,9 +366,63 @@ func TestUnavailableToolIsError(t *testing.T) {
 	s, ts := newTestServer(t)
 	env, end := s.Begin(&Turn{React: okReact})
 	defer end()
-	out := call(t, ts, tokenOf(t, env), "send_file", `{"path":"/f"}`)
+	tok := tokenOf(t, env)
+	out := call(t, ts, tok, "send_file", `{"path":"/f"}`)
 	if !out.IsError || len(out.Content) != 1 || out.Content[0].Text != "文件功能当前不可用。" {
 		t.Fatalf("send_file without CheckFile = %+v, want the unavailable text", out)
+	}
+	if out := call(t, ts, tok, "pronounce", `{"text":"hello"}`); !out.IsError || out.Content[0].Text != "语音发音功能当前不可用。" {
+		t.Fatalf("pronounce without callback = %+v", out)
+	}
+	if out := call(t, ts, tok, "send_web_image", `{"url":"https://example.com/a.jpg"}`); !out.IsError || out.Content[0].Text != "网络图片发送功能当前不可用。" {
+		t.Fatalf("send_web_image without callback = %+v", out)
+	}
+}
+
+func TestPronounceAndSendWebImageTools(t *testing.T) {
+	s, ts := newTestServer(t)
+	turn := &Turn{
+		MaxFiles: 2,
+		Pronounce: func(_ context.Context, text, lang string) (File, string, error) {
+			if text == "fail" {
+				return File{}, "", &ToolError{Msg: "语音服务暂时不可用"}
+			}
+			return File{Path: "/media/word.mp3", Name: "word_en-US.mp3", Caption: "/wɜːrd/", Size: 120}, "Queued word_en-US.mp3 (IPA: /wɜːrd/).", nil
+		},
+		FetchWebImage: func(_ context.Context, rawURL, caption string) (File, error) {
+			if strings.Contains(rawURL, "nsfw") {
+				return File{}, &ToolError{Msg: "禁止发送违规图片"}
+			}
+			return File{Path: "/media/pic.jpg", Name: "pic.jpg", Caption: caption, Size: 512}, nil
+		},
+	}
+	env, end := s.Begin(turn)
+	defer end()
+	tok := tokenOf(t, env)
+
+	if names := listTools(t, ts, tok); len(names) != 2 || names[0] != "pronounce" || names[1] != "send_web_image" {
+		t.Fatalf("tools = %v, want [pronounce send_web_image]", names)
+	}
+
+	pOut := call(t, ts, tok, "pronounce", `{"text":"word","lang":"en-US"}`)
+	if pOut.IsError || !strings.Contains(pOut.Content[0].Text, "IPA: /wɜːrd/") {
+		t.Fatalf("pronounce result: %+v", pOut)
+	}
+	if bad := call(t, ts, tok, "pronounce", `{"text":"fail"}`); !bad.IsError || bad.Content[0].Text != "语音服务暂时不可用" {
+		t.Fatalf("pronounce error: %+v", bad)
+	}
+
+	if unsafe := call(t, ts, tok, "send_web_image", `{"url":"https://example.com/nsfw.jpg"}`); !unsafe.IsError || unsafe.Content[0].Text != "禁止发送违规图片" {
+		t.Fatalf("unsafe web image: %+v", unsafe)
+	}
+	wOut := call(t, ts, tok, "send_web_image", `{"url":"https://example.com/pic.jpg","caption":"风景"}`)
+	if wOut.IsError {
+		t.Fatalf("send_web_image result: %+v", wOut)
+	}
+
+	files := turn.Files()
+	if len(files) != 2 || files[0].Name != "word_en-US.mp3" || files[1].Name != "pic.jpg" || files[1].Caption != "风景" {
+		t.Fatalf("queued files = %+v", files)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/rshun/grok-bot/internal/config"
 	"github.com/rshun/grok-bot/internal/core"
 	"github.com/rshun/grok-bot/internal/grok"
+	"github.com/rshun/grok-bot/internal/media"
 	"github.com/rshun/grok-bot/internal/platform"
 	"github.com/rshun/grok-bot/internal/platform/discord"
 	"github.com/rshun/grok-bot/internal/platform/telegram"
@@ -101,9 +102,11 @@ func main() {
 	if activeEnvFile != "" {
 		cfg.EnvFile = activeEnvFile
 	}
+	mediaDir := filepath.Join(dataDir, "media")
 	policy := sandbox.Policy{
 		Home:     home,
 		DataDir:  dataDir,
+		MediaDir: mediaDir,
 		EnvFile:  cfg.EnvFile,
 		AuthPath: cfg.AuthPath,
 	}
@@ -143,6 +146,10 @@ func main() {
 	// MkdirAll keeps the mode of a directory that already exists.
 	if err := os.Chmod(inbox, 0o700); err != nil {
 		slog.Warn("inbox dir mode", "err", err)
+	}
+	if err := os.MkdirAll(mediaDir, 0o750); err != nil {
+		slog.Error("media dir", "err", err)
+		os.Exit(1)
 	}
 	db, err := store.Open(cfg.DataDir, cfg.DefaultModel)
 	if err != nil {
@@ -206,6 +213,8 @@ func main() {
 		AllowShell:          cfg.AllowShell,
 		ShowProgress:        cfg.ShowProgress,
 		UploadDir:           filepath.Join(dataDir, "uploads"),
+		MediaDir:            mediaDir,
+		ImageAuditor:        media.NoopImageAuditor{},
 		Sandbox:             sandboxManager,
 		Senders:             map[string]platform.Replier{},
 		Location:            cfg.Location,

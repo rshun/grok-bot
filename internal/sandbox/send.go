@@ -104,6 +104,46 @@ func sendReadError(err error) error {
 	return errors.New("读取这个文件失败。")
 }
 
+// CheckGeneratedMedia validates a file when full host file tools are off (e.g. unsandboxed OS):
+// only files inside Policy.MediaDir or Grok's session image output directory (<Home>/.grok/sessions/**/images/*)
+// are accepted, and every normal CheckSendable rule still applies.
+func (p Policy) CheckGeneratedMedia(path string) (real string, size int64, err error) {
+	real, size, err = p.CheckSendable(path)
+	if err != nil {
+		return "", 0, err
+	}
+	if p.inMediaDir(real) || p.inSessionImagesDir(real) {
+		return real, size, nil
+	}
+	return "", 0, errSendDenied
+}
+
+func (p Policy) inMediaDir(path string) bool {
+	if p.MediaDir == "" {
+		return false
+	}
+	mediaRoot := resolve(p.MediaDir)
+	return path != mediaRoot && within(path, mediaRoot)
+}
+
+func (p Policy) inSessionImagesDir(path string) bool {
+	if p.Home == "" {
+		return false
+	}
+	sessionsRoot := resolve(filepath.Join(p.Home, ".grok", "sessions"))
+	if !within(path, sessionsRoot) {
+		return false
+	}
+	if !strings.EqualFold(filepath.Base(filepath.Dir(path)), "images") {
+		return false
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".jpg", ".jpeg", ".png", ".webp", ".gif":
+		return true
+	}
+	return false
+}
+
 // denied reports whether path, or any directory above it, is on the deny list,
 // lies in a kernel directory (see kernelDirs) or in DATA_DIR.
 // A "**/" pattern matches the file name and every directory name above it, so
@@ -118,9 +158,11 @@ func (p Policy) denied(path string) bool {
 	}
 	// DATA_DIR holds the database, the bot's grok workspace and the inbox, where other
 	// chats' prompt files (with their images) sit while a turn runs. None of it is ever
-	// meant for a chat, so it is refused for sending even where the sandbox lets Grok read.
+	// meant for a chat, except regular media files inside the bot-managed MediaDir.
 	if p.DataDir != "" && within(path, resolve(p.DataDir)) {
-		return true
+		if !p.inMediaDir(path) {
+			return true
+		}
 	}
 	var targetInfos []os.FileInfo
 	for _, entry := range p.Deny() {
