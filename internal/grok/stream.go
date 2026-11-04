@@ -237,17 +237,28 @@ func extractImagePaths(text string) []string {
 }
 
 func isLikelyImagePath(p string) bool {
-	if p == "" {
+	if p == "" || !isCrossPlatformAbsPath(p) {
 		return false
 	}
-	if !filepath.IsAbs(p) && !strings.HasPrefix(p, "/") {
+	dot := strings.LastIndexByte(p, '.')
+	if dot < 0 {
 		return false
 	}
-	switch strings.ToLower(filepath.Ext(p)) {
+	switch strings.ToLower(p[dot:]) {
 	case ".jpg", ".jpeg", ".png", ".webp", ".gif":
 		return true
 	}
 	return false
+}
+
+func isCrossPlatformAbsPath(p string) bool {
+	if filepath.IsAbs(p) || strings.HasPrefix(p, "/") {
+		return true
+	}
+	return len(p) >= 3 &&
+		((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) &&
+		p[1] == ':' &&
+		(p[2] == '\\' || p[2] == '/')
 }
 
 func containsString(list []string, s string) bool {
