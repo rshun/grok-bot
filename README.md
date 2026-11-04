@@ -94,13 +94,18 @@ centurion-live status | /home/grok/grok-bot/grok-bot send
 - **已知风险（已接受）**：Grok 能读服务用户能读的一切，同时又能打开网页。恶意网页可能诱导 Grok 读取本机文件并通过网址发出去。请用专门的系统用户运行服务，不要让它能读到不该给 Grok 看的文件。
 - bot 不再把自己的 token 和配置（`TELEGRAM_BOT_TOKEN`、`DISCORD_BOT_TOKEN`、允许名单、`DATA_DIR`、`BOT_ENV_FILE` 等）传给 grok，Grok 读 `/proc/self/environ` 也拿不到 bot token。`GROK_*` 开头的设置和 `HOME`、`PATH`、语言、代理等通用变量照常传下去。
 
-### 定时任务
+### 定时任务（系统原生调度器驱动）
 
-`/task` 后面用一句话描述时间和要做的事，由 Grok 解析成"一次 / 每天 / 每周 / 每隔多少分钟"。解析结果会复述给你，错了就用 `/task del 编号` 删掉。
+`/task` 后面用一句话描述时间和要做的事（也可直接在对话里自然语言说），由 Grok 解析成「一次 / 每天 / 每周 / 每月几号 / 月末最后一天 / 每隔多少分钟 / 按日期文件 / 5 段 Cron 表达式」。解析结果会复述给你，错了就用 `/task del 编号` 删掉。
 
-- 每次执行都用独立的新会话，不会混进你平时聊天的上下文；结果以 `⏰ 定时任务 #编号` 开头发回创建它的聊天。
-- 一次性任务执行后自动删除。bot 停机期间错过的执行不补跑；错过的一次性任务会提示后删除。
-- 时区由 `TIMEZONE` 决定。每个聊天最多 `TASK_LIMIT` 个任务，周期任务间隔不少于 `TASK_MIN_INTERVAL`。
+- **系统级原生触发（不再由 `grok-bot` 进程内定时器轮询触发）**：创建、修改、暂停、恢复或删除任务时，`grok-bot` 会自动把任务同步注册到当前操作系统的原生定时服务中，到点由系统直接调起 `grok-bot run-task <编号> --data-dir <目录> --env-file <配置>` 单次执行：
+  - **Linux / Unix**：写入当前服务用户的系统 `crontab`（托管区块 `# BEGIN GROK-BOT TASKS` ... `# END GROK-BOT TASKS`，可用 `crontab -l` 查看）。
+  - **macOS**：写入当前用户的 `~/Library/LaunchAgents/com.grokbot.task.<编号>.plist` 并通过 `launchctl` 加载（可用 `launchctl list | grep grokbot` 查看）。
+  - **Windows**：注册到系统自带「任务计划程序」（`schtasks.exe`，路径 `\GrokBot\Task_<编号>`，可用 `schtasks /Query /TN "\GrokBot\"` 查看）。
+- `/status` 会显示当前生效的系统调度器类型与同步状态；任务执行期的错误日志会同时写入 `<DATA_DIR>/task-scheduler.log`（满 2MB 自动轮转为 `.1`）。
+- 每次执行都用独立的新会话，不会混进你平时聊天的上下文；结果以 `⏰ 定时任务 #编号` 开头同时推送到已配置的 Telegram 与 Discord。
+- 一次性任务执行后自动从数据库和系统调度器中移除。停机期间错过的执行不补跑；错过的一次性任务会提示后删除。
+- 时区由 `TIMEZONE` 决定。最多保存 `TASK_LIMIT` 个任务，周期任务间隔不少于 `TASK_MIN_INTERVAL`。
 
 ### 进度消息
 

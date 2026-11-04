@@ -133,7 +133,7 @@ func MergeCrontab(existing string, entries []CronEntry, loc *time.Location, comm
 		if err := json.Unmarshal([]byte(e.Spec), &spec); err != nil {
 			continue
 		}
-		expr, err := spec.CronExpr(loc)
+		expr, err := CronExprForEntry(spec, e.NextRun, loc)
 		if err != nil {
 			continue
 		}
@@ -188,6 +188,32 @@ func stripManagedBlock(existing string) string {
 	return strings.TrimRight(strings.Join(kept, "\n"), "\n")
 }
 
+// CronExprForEntry returns the 5-field cron expression for spec, anchoring hourly/multi-hour
+// intervals to nextRun's minute and hour offset when nextRun is known.
+func CronExprForEntry(s Spec, nextRun time.Time, loc *time.Location) (string, error) {
+	if loc == nil {
+		loc = time.Local
+	}
+	if s.Kind == "interval" && !nextRun.IsZero() && s.EveryMinutes >= 60 {
+		nr := nextRun.In(loc)
+		if s.EveryMinutes == 60 {
+			return fmt.Sprintf("%d * * * *", nr.Minute()), nil
+		}
+		if s.EveryMinutes%60 == 0 && s.EveryMinutes/60 <= 23 {
+			stepH := s.EveryMinutes / 60
+			if 24%stepH == 0 {
+				offset := nr.Hour() % stepH
+				if offset == 0 {
+					return fmt.Sprintf("%d */%d * * *", nr.Minute(), stepH), nil
+				}
+				return fmt.Sprintf("%d %d-23/%d * * *", nr.Minute(), offset, stepH), nil
+			}
+			return fmt.Sprintf("%d * * * *", nr.Minute()), nil
+		}
+	}
+	return s.CronExpr(loc)
+}
+
 // Crontab synchronizes scheduled tasks with the OS user crontab.
 type Crontab struct {
 	CommandPrefix string
@@ -195,25 +221,46 @@ type Crontab struct {
 	Write         func(string) error
 }
 
-// NewSystemCrontab returns a Crontab backed by the system `crontab` command,
-// or nil if the `crontab` binary is not available on this machine.
-func NewSystemCrontab(binPath, workDir, envFile string) *Crontab {
+// Name returns the display name of the crontab scheduler backend.
+func (c *Crontab) Name() string {
+	return "Linux crontab"
+}
+
+// NewSystemCrontabFromConfig returns a Crontab backed by the system `crontab` command.
+func NewSystemCrontabFromConfig(cfg SystemConfig) (*Crontab, error) {
 	if _, err := exec.LookPath("crontab"); err != nil {
-		return nil
+		return nil, errors.New("系统未安装 crontab 命令（请安装并启动 cron 服务）")
 	}
 	var prefix strings.Builder
-	if workDir != "" {
-		fmt.Fprintf(&prefix, "cd %s && ", shellQuote(workDir))
+	if cfg.WorkDir != "" {
+		fmt.Fprintf(&prefix, "cd %s && ", shellQuote(cfg.WorkDir))
 	}
-	if envFile != "" {
-		fmt.Fprintf(&prefix, "BOT_ENV_FILE=%s ", shellQuote(envFile))
+	prefix.WriteString(shellQuote(cfg.BinPath))
+	if cfg.DataDir != "" {
+		fmt.Fprintf(&prefix, " --data-dir %s", shellQuote(cfg.DataDir))
 	}
-	prefix.WriteString(shellQuote(binPath))
+	if cfg.EnvFile != "" {
+		fmt.Fprintf(&prefix, " --env-file %s", shellQuote(cfg.EnvFile))
+	}
 	return &Crontab{
 		CommandPrefix: prefix.String(),
 		Read:          readSystemCrontab,
 		Write:         writeSystemCrontab,
+	}, nil
+}
+
+// NewSystemCrontab returns a Crontab backed by the system `crontab` command,
+// or nil if the `crontab` binary is not available on this machine.
+func NewSystemCrontab(binPath, workDir, envFile string) *Crontab {
+	c, err := NewSystemCrontabFromConfig(SystemConfig{
+		BinPath: binPath,
+		WorkDir: workDir,
+		EnvFile: envFile,
+	})
+	if err != nil {
+		return nil
 	}
+	return c
 }
 
 // Sync updates the managed block in the user's crontab.

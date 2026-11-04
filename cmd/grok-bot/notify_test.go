@@ -66,16 +66,27 @@ func TestParseCLI(t *testing.T) {
 		t.Fatalf("flags before notify: %#v, err=%v", inv, err)
 	}
 
-	// Valid and invalid `run-task`.
+	// Valid and invalid `run-task` (including OS-scheduler `--data-dir` and `--env-file` flags).
 	inv, err = parseCLI([]string{"run-task", "42"})
 	if err != nil || inv.Mode != modeRunTask || inv.TaskID != 42 {
 		t.Fatalf("run-task: %#v, err=%v", inv, err)
+	}
+	inv, err = parseCLI([]string{"run-task", "42", "--data-dir", "/srv/data", "--env-file", "/srv/.env"})
+	if err != nil || inv.Mode != modeRunTask || inv.TaskID != 42 || inv.DataDir != "/srv/data" || inv.EnvFile != "/srv/.env" {
+		t.Fatalf("run-task flags after: %#v, err=%v", inv, err)
+	}
+	inv, err = parseCLI([]string{"--data-dir", "/srv/data", "--env-file", "/srv/.env", "run-task", "7"})
+	if err != nil || inv.Mode != modeRunTask || inv.TaskID != 7 || inv.DataDir != "/srv/data" || inv.EnvFile != "/srv/.env" {
+		t.Fatalf("run-task flags before: %#v, err=%v", inv, err)
 	}
 	if _, err := parseCLI([]string{"run-task"}); err == nil {
 		t.Fatal("expected error for bare run-task")
 	}
 	if _, err := parseCLI([]string{"run-task", "abc"}); err == nil {
 		t.Fatal("expected error for non-numeric task id")
+	}
+	if _, err := parseCLI([]string{"run-task", "42", "--data-dir"}); err == nil {
+		t.Fatal("expected error for missing --data-dir value")
 	}
 
 	// Unknown args MUST fail instead of falling through to daemon mode!

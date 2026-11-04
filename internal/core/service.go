@@ -56,7 +56,11 @@ type Service struct {
 	Location        *time.Location
 	TaskLimit       int
 	TaskMinInterval time.Duration
-	// Crontab syncs scheduled tasks into the OS user crontab when non-nil.
+	// Scheduler syncs scheduled tasks into the host OS's native scheduler
+	// (Linux crontab, macOS launchd LaunchAgents, Windows Task Scheduler).
+	Scheduler        schedule.Backend
+	SchedulerInitErr error
+	// Crontab syncs scheduled tasks into the OS user crontab when Scheduler is nil.
 	Crontab *schedule.Crontab
 	// ShowProgress controls whether an editable "处理中…" status message is sent before the answer.
 	ShowProgress bool
@@ -67,9 +71,10 @@ type Service struct {
 	// Now is the clock for scheduling; nil means time.Now.
 	Now func() time.Time
 
-	mu         sync.Mutex
-	lanes      map[string]*lane
-	dmChannels map[string]string
+	mu           sync.Mutex
+	lanes        map[string]*lane
+	dmChannels   map[string]string
+	lastSchedErr error
 }
 
 type lane struct {

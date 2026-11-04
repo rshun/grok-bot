@@ -33,13 +33,15 @@ const (
 type cliInvocation struct {
 	Mode     cliMode
 	TaskID   int64
+	DataDir  string
+	EnvFile  string
 	PushArgs []string
 }
 
 const cliUsage = `用法：
   grok-bot                         启动机器人常驻服务（Telegram / Discord）
   grok-bot send [选项] "消息内容"   主动推送文字或文件到私聊（支持管道输入）
-  grok-bot run-task <任务编号>      单次执行指定编号的定时任务
+  grok-bot run-task <任务编号>      单次执行指定编号的定时任务（供系统调度器调用）
   grok-bot --version               查看版本号
   grok-bot --help                  查看帮助说明
 
@@ -80,18 +82,11 @@ func parseCLI(args []string) (cliInvocation, error) {
 			return cliInvocation{}, errors.New("run-task 需要指定任务编号，例如：grok-bot run-task 1")
 		}
 	}
-	if args[0] == "run-task" {
-		if len(args) != 2 {
-			return cliInvocation{}, errors.New("用法：grok-bot run-task <任务编号>")
-		}
-		id, err := strconv.ParseInt(args[1], 10, 64)
-		if err != nil || id <= 0 {
-			return cliInvocation{}, fmt.Errorf("无效的任务编号 %q", args[1])
-		}
-		return cliInvocation{Mode: modeRunTask, TaskID: id}, nil
-	}
 	if args[0] == "send" || args[0] == "notify" {
 		return cliInvocation{Mode: modePush, PushArgs: args[1:]}, nil
+	}
+	if inv, matched, err := tryParseRunTask(args); matched {
+		return inv, err
 	}
 	// Also accept push flags before `send` / `notify` (e.g. `grok-bot -p dc send "msg"`).
 	for i := 0; i < len(args); i++ {
@@ -113,6 +108,71 @@ func parseCLI(args []string) (cliInvocation, error) {
 		}
 	}
 	return cliInvocation{}, fmt.Errorf("未知命令或参数：%s", strings.Join(args, " "))
+}
+
+func tryParseRunTask(args []string) (cliInvocation, bool, error) {
+	if len(args) == 0 {
+		return cliInvocation{}, false, nil
+	}
+	matched := args[0] == "run-task"
+	if !matched {
+		for i := 0; i < len(args); i++ {
+			tok := args[i]
+			switch {
+			case tok == "--data-dir" || tok == "--env-file":
+				i++
+			case strings.HasPrefix(tok, "--data-dir=") || strings.HasPrefix(tok, "--env-file="):
+			case tok == "run-task":
+				matched = true
+				goto parse
+			default:
+				return cliInvocation{}, false, nil
+			}
+		}
+		return cliInvocation{}, false, nil
+	}
+
+parse:
+	inv := cliInvocation{Mode: modeRunTask}
+	sawSubcmd := false
+	for i := 0; i < len(args); i++ {
+		tok := args[i]
+		switch {
+		case tok == "run-task" && !sawSubcmd:
+			sawSubcmd = true
+		case tok == "--data-dir":
+			if i+1 >= len(args) {
+				return cliInvocation{}, true, errors.New("参数 --data-dir 缺少目录路径")
+			}
+			i++
+			inv.DataDir = strings.TrimSpace(args[i])
+		case strings.HasPrefix(tok, "--data-dir="):
+			inv.DataDir = strings.TrimSpace(strings.TrimPrefix(tok, "--data-dir="))
+		case tok == "--env-file":
+			if i+1 >= len(args) {
+				return cliInvocation{}, true, errors.New("参数 --env-file 缺少文件路径")
+			}
+			i++
+			inv.EnvFile = strings.TrimSpace(args[i])
+		case strings.HasPrefix(tok, "--env-file="):
+			inv.EnvFile = strings.TrimSpace(strings.TrimPrefix(tok, "--env-file="))
+		case strings.HasPrefix(tok, "-"):
+			return cliInvocation{}, true, fmt.Errorf("未知选项 %s", tok)
+		default:
+			if inv.TaskID != 0 {
+				return cliInvocation{}, true, errors.New("用法：grok-bot run-task <任务编号>")
+			}
+			id, err := strconv.ParseInt(tok, 10, 64)
+			if err != nil || id <= 0 {
+				return cliInvocation{}, true, fmt.Errorf("无效的任务编号 %q", tok)
+			}
+			inv.TaskID = id
+		}
+	}
+	if inv.TaskID <= 0 {
+		return cliInvocation{}, true, errors.New("run-task 需要指定任务编号，例如：grok-bot run-task 1")
+	}
+	return inv, true, nil
 }
 
 func isPushHelp(args []string) bool {

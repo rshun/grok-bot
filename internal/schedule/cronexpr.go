@@ -178,3 +178,147 @@ func parseCronField(field string, minVal, maxVal int, mapSevenToZero bool) ([]bo
 	}
 	return out, false, nil
 }
+
+// CalendarSlot represents one calendar trigger combination; nil fields mean wildcard (*).
+type CalendarSlot struct {
+	Month   *int // 1..12
+	Day     *int // 1..31
+	Weekday *int // 0..6 (Sunday=0)
+	Hour    *int // 0..23
+	Minute  *int // 0..59
+}
+
+// CronStructure exposes the compiled boolean bitmaps of a 5-field cron expression
+// for OS-native scheduler translation (launchd, Windows Task Scheduler).
+type CronStructure struct {
+	Minutes  []int // 0..59 (empty means all 60 minutes = wildcard)
+	Hours    []int // 0..23 (empty means all 24 hours = wildcard)
+	Days     []int // 1..31 (empty when DOMStar is true)
+	Months   []int // 1..12 (empty means all 12 months = wildcard)
+	Weekdays []int // 0..6  (empty when DOWStar is true)
+	DOMStar  bool
+	DOWStar  bool
+}
+
+// AnalyzeCron compiles a 5-field cron expression into its active values and wildcard flags.
+func AnalyzeCron(expr string) (CronStructure, error) {
+	fields := strings.Fields(strings.TrimSpace(expr))
+	if len(fields) != 5 {
+		return CronStructure{}, errors.New("Cron 表达式需要 5 段（分 时 日 月 周）")
+	}
+	c, err := compileCron(fields)
+	if err != nil {
+		return CronStructure{}, err
+	}
+	st := CronStructure{
+		Minutes: collapseFull(collectTrue(c.minutes[:], 0, 59), 60),
+		Hours:   collapseFull(collectTrue(c.hours[:], 0, 23), 24),
+		Months:  collapseFull(collectTrue(c.months[:], 1, 12), 12),
+		DOMStar: c.domStar,
+		DOWStar: c.dowStar,
+	}
+	if !c.domStar {
+		st.Days = collectTrue(c.days[:], 1, 31)
+	}
+	if !c.dowStar {
+		st.Weekdays = collectTrue(c.weekdays[:], 0, 6)
+	}
+	return st, nil
+}
+
+// ExpandCronSlots expands a 5-field cron expression into CalendarSlot entries suitable
+// for macOS launchd StartCalendarInterval. Returns ok=false when the Cartesian product
+// exceeds maxSlots so callers can fall back to a 60-second interval trigger.
+func ExpandCronSlots(expr string, maxSlots int) (slots []CalendarSlot, ok bool, err error) {
+	st, err := AnalyzeCron(expr)
+	if err != nil {
+		return nil, false, err
+	}
+	if maxSlots <= 0 {
+		maxSlots = 128
+	}
+	mons := optionalInts(st.Months)
+	hrs := optionalInts(st.Hours)
+	mins := optionalInts(st.Minutes)
+
+	type dayPair struct {
+		day     *int
+		weekday *int
+	}
+	var pairs []dayPair
+	switch {
+	case st.DOMStar && st.DOWStar:
+		pairs = []dayPair{{}}
+	case !st.DOMStar && st.DOWStar:
+		for _, d := range st.Days {
+			v := d
+			pairs = append(pairs, dayPair{day: &v})
+		}
+	case st.DOMStar && !st.DOWStar:
+		for _, w := range st.Weekdays {
+			v := w
+			pairs = append(pairs, dayPair{weekday: &v})
+		}
+	default:
+		// Standard Vixie cron OR semantics when both DOM and DOW are restricted.
+		for _, d := range st.Days {
+			v := d
+			pairs = append(pairs, dayPair{day: &v})
+		}
+		for _, w := range st.Weekdays {
+			v := w
+			pairs = append(pairs, dayPair{weekday: &v})
+		}
+	}
+
+	total := len(mons) * len(pairs) * len(hrs) * len(mins)
+	if total == 0 || total > maxSlots {
+		return nil, false, nil
+	}
+	slots = make([]CalendarSlot, 0, total)
+	for _, mon := range mons {
+		for _, dp := range pairs {
+			for _, hr := range hrs {
+				for _, min := range mins {
+					slots = append(slots, CalendarSlot{
+						Month:   mon,
+						Day:     dp.day,
+						Weekday: dp.weekday,
+						Hour:    hr,
+						Minute:  min,
+					})
+				}
+			}
+		}
+	}
+	return slots, true, nil
+}
+
+func collectTrue(bits []bool, lo, hi int) []int {
+	var out []int
+	for i := lo; i <= hi && i < len(bits); i++ {
+		if bits[i] {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+func collapseFull(vals []int, full int) []int {
+	if len(vals) >= full {
+		return nil
+	}
+	return vals
+}
+
+func optionalInts(vals []int) []*int {
+	if len(vals) == 0 {
+		return []*int{nil}
+	}
+	out := make([]*int, len(vals))
+	for i, v := range vals {
+		val := v
+		out[i] = &val
+	}
+	return out
+}
