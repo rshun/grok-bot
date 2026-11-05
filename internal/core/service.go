@@ -68,6 +68,14 @@ type Service struct {
 	Location        *time.Location
 	TaskLimit       int
 	TaskMinInterval time.Duration
+	// ScriptDirs are the only directories whose scripts may be bound to script tasks.
+	ScriptDirs []string
+	// ScriptTimeout bounds one script task run; 0 means 30 minutes.
+	ScriptTimeout time.Duration
+	// ScriptLogDir keeps each script task's full output (<DATA_DIR>/task-logs).
+	ScriptLogDir string
+	// ScriptEnv are extra KEY=VALUE entries for script tasks (e.g. GROK_BOT_BIN, BOT_ENV_FILE).
+	ScriptEnv []string
 	// Scheduler syncs scheduled tasks into the host OS's native scheduler
 	// (Linux crontab, macOS launchd LaunchAgents, Windows Task Scheduler).
 	Scheduler        schedule.Backend

@@ -36,6 +36,8 @@ type Task struct {
 	Summary  string
 	NextRun  time.Time
 	Paused   bool
+	// Script is the absolute path of a local script run instead of a Grok prompt; empty for prompt tasks.
+	Script string
 }
 
 // Memory is one persistent user instruction or fact scoped to a chat.
@@ -163,6 +165,16 @@ func (s *Store) migrate() error {
 	}
 	if !hasTaskPaused {
 		if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN paused INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	hasTaskScript, err := s.hasColumn("tasks", "script")
+	if err != nil {
+		return err
+	}
+	if !hasTaskScript {
+		// Existing tasks stay Grok prompt tasks (empty script).
+		if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN script TEXT NOT NULL DEFAULT ''`); err != nil {
 			return err
 		}
 	}
@@ -301,10 +313,10 @@ func (s *Store) DeleteDir(ctx context.Context, path string) (bool, error) {
 // AddTask stores a scheduled task and returns its id.
 func (s *Store) AddTask(ctx context.Context, t Task) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO tasks (platform, chat_id, user_id, spec, prompt, summary, next_run, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO tasks (platform, chat_id, user_id, spec, prompt, summary, next_run, created_at, script)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, t.Platform, t.ChatID, t.UserID, t.Spec, t.Prompt, t.Summary,
-		t.NextRun.UTC().Format(runLayout), time.Now().UTC().Format(time.RFC3339Nano))
+		t.NextRun.UTC().Format(runLayout), time.Now().UTC().Format(time.RFC3339Nano), t.Script)
 	if err != nil {
 		return 0, fmt.Errorf("save task: %w", err)
 	}
@@ -377,6 +389,16 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, spec, prompt, summary 
 		`UPDATE tasks SET spec = ?, prompt = ?, summary = ?, next_run = ?, paused = 0 WHERE id = ?`,
 		spec, prompt, summary, next.UTC().Format(runLayout), id)
 	return err
+}
+
+// SetTaskScript binds (or with an empty path, unbinds) a local script to an existing task.
+func (s *Store) SetTaskScript(ctx context.Context, id int64, script string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE tasks SET script = ? WHERE id = ?`, script, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // Setting reads a persisted key-value setting.
@@ -781,7 +803,7 @@ func (s *Store) KnownChats(ctx context.Context, platform string) ([]string, erro
 
 func (s *Store) queryTasks(ctx context.Context, where string, args ...any) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, platform, chat_id, user_id, spec, prompt, summary, next_run, paused FROM tasks `+where, args...)
+		`SELECT id, platform, chat_id, user_id, spec, prompt, summary, next_run, paused, script FROM tasks `+where, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -791,7 +813,7 @@ func (s *Store) queryTasks(ctx context.Context, where string, args ...any) ([]Ta
 		var t Task
 		var next string
 		var paused int
-		if err := rows.Scan(&t.ID, &t.Platform, &t.ChatID, &t.UserID, &t.Spec, &t.Prompt, &t.Summary, &next, &paused); err != nil {
+		if err := rows.Scan(&t.ID, &t.Platform, &t.ChatID, &t.UserID, &t.Spec, &t.Prompt, &t.Summary, &next, &paused, &t.Script); err != nil {
 			return nil, err
 		}
 		t.NextRun, err = time.Parse(runLayout, next)
