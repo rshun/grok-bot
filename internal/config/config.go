@@ -44,7 +44,11 @@ type Config struct {
 	Location        *time.Location
 	TaskLimit       int
 	TaskMinInterval time.Duration
-	Version         string
+	// ScriptDirs are the only directories whose scripts may be bound to /task script tasks.
+	ScriptDirs []string
+	// ScriptTimeout bounds one script task run.
+	ScriptTimeout time.Duration
+	Version       string
 }
 
 func Load() (Config, error) {
@@ -160,6 +164,14 @@ func Load() (Config, error) {
 	if model == "" {
 		model = defaultModel
 	}
+	scriptDirs := parseScriptDirs(os.Getenv("SCRIPT_DIRS"), home)
+	scriptTimeout := 30 * time.Minute
+	if raw := strings.TrimSpace(os.Getenv("SCRIPT_TIMEOUT")); raw != "" {
+		scriptTimeout, err = time.ParseDuration(raw)
+		if err != nil || scriptTimeout <= 0 {
+			return Config{}, fmt.Errorf("SCRIPT_TIMEOUT must be a positive duration such as 30m")
+		}
+	}
 	bin := strings.TrimSpace(os.Getenv("GROK_BIN"))
 	if bin == "" {
 		bin = "grok"
@@ -198,7 +210,27 @@ func Load() (Config, error) {
 		Location:        location,
 		TaskLimit:       taskLimit,
 		TaskMinInterval: minInterval,
+		ScriptDirs:      scriptDirs,
+		ScriptTimeout:   scriptTimeout,
 	}, nil
+}
+
+// parseScriptDirs splits SCRIPT_DIRS (comma or OS path-list separated); it defaults to ~/bin.
+func parseScriptDirs(raw, home string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return []string{filepath.Join(home, "bin")}
+	}
+	var out []string
+	for _, part := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == os.PathListSeparator
+	}) {
+		part = strings.TrimSpace(part)
+		if part != "" && filepath.IsAbs(part) {
+			out = append(out, filepath.Clean(part))
+		}
+	}
+	return out
 }
 
 func parseUsers(raw, envName, platformName string) (map[string]struct{}, error) {

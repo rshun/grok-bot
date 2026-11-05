@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,7 +35,11 @@ const taskUsage = `用法：
 /task pause 编号 / /task resume 编号 / /task skip 编号
     暂停、恢复或跳过下次定时任务
 /task del 编号
-    删除定时任务`
+    删除定时任务
+/task script 59 7 * * 1-5 /home/grok/bin/job.py 工作日早餐下单
+    创建脚本任务：到点直接运行本机脚本（不调用 Grok、不占会话），脚本须放在 SCRIPT_DIRS 目录内
+/task bind 编号 /home/grok/bin/job.py
+    把已有定时任务改为运行脚本（保留原时间）；/task unbind 编号 恢复为 Grok 指令任务`
 
 const notUnderstood = "没看懂时间，请换个说法。"
 
@@ -114,6 +119,19 @@ func (s *Service) taskCommand(ctx context.Context, in platform.Inbound, out plat
 		return reply, nil, nil, err
 	case fields[0] == "cron":
 		return "用法：`/task cron <分> <时> <日> <月> <周> <指令内容>`（例如：`/task cron 30 9 1 * * 汇总上月账单`）", nil, nil, nil
+	case fields[0] == "script" && len(fields) >= 7:
+		reply, err := s.taskCreateScript(ctx, in, fields[1:6], fields[6], strings.Join(fields[7:], " "))
+		return reply, nil, nil, err
+	case fields[0] == "script":
+		return "用法：`/task script <分> <时> <日> <月> <周> <脚本绝对路径> [说明]`（例如：`/task script 59 7 * * 1-5 /home/grok/bin/auto_breakfast.py 工作日早餐下单`）", nil, nil, nil
+	case fields[0] == "bind" && len(fields) == 3:
+		reply, err := s.taskBindScript(ctx, fields[1], fields[2])
+		return reply, nil, nil, err
+	case fields[0] == "unbind" && len(fields) == 2:
+		reply, err := s.taskBindScript(ctx, fields[1], "")
+		return reply, nil, nil, err
+	case fields[0] == "bind" || fields[0] == "unbind":
+		return "用法：`/task bind <编号> <脚本绝对路径>` 或 `/task unbind <编号>`", nil, nil, nil
 	default:
 		reply, files, err := s.taskCreateWithProgress(ctx, in, out, arg, onTool)
 		if errors.Is(err, errNotTask) {
@@ -134,11 +152,15 @@ func (s *Service) taskList(ctx context.Context, _ platform.Inbound) (string, [][
 	var b strings.Builder
 	b.WriteString("定时任务（TG / Discord 同步共享并同时推送）：\n")
 	for _, t := range tasks {
+		mark := ""
+		if t.Script != "" {
+			mark = " 📜"
+		}
 		if t.Paused {
-			fmt.Fprintf(&b, "#%d %s（已暂停）\n", t.ID, t.Summary)
+			fmt.Fprintf(&b, "#%d%s %s（已暂停）\n", t.ID, mark, t.Summary)
 			continue
 		}
-		fmt.Fprintf(&b, "#%d %s（下次 %s）\n", t.ID, t.Summary, t.NextRun.In(s.location()).Format("01-02 15:04"))
+		fmt.Fprintf(&b, "#%d%s %s（下次 %s）\n", t.ID, mark, t.Summary, t.NextRun.In(s.location()).Format("01-02 15:04"))
 	}
 	return strings.TrimSpace(b.String()), taskListButtons(tasks), nil
 }
@@ -256,6 +278,9 @@ func (s *Service) taskManage(ctx context.Context, in platform.Inbound, out platf
 	}
 	switch parsed.Action {
 	case "run":
+		if target.Script != "" {
+			return s.startScriptTrial(*target), nil, nil
+		}
 		runIn := platform.Inbound{
 			Platform:    in.Platform,
 			ChatID:      in.ChatID,
@@ -559,6 +584,15 @@ func (s *Service) RunTaskByID(ctx context.Context, id int64) error {
 	if err != nil {
 		return err
 	}
+	if t.Script != "" {
+		// Script tasks report themselves on success (e.g. via `grok-bot send`); only failures are pushed.
+		text, ok := s.runScriptTask(ctx, t)
+		if !ok {
+			s.deliverTask(ctx, t, "", "", nil, text, nil)
+		}
+		_ = s.syncScheduler(ctx)
+		return nil
+	}
 	primary, ok := s.primaryTaskTarget(ctx, t)
 	if !ok {
 		_ = s.syncScheduler(ctx)
@@ -646,6 +680,10 @@ func (s *Service) runTask(ctx context.Context, in platform.Inbound, out platform
 }
 
 func (s *Service) runTaskWithProgress(ctx context.Context, in platform.Inbound, out platform.Replier, t store.Task, onTool func(grok.ToolUse)) (string, []actions.File) {
+	if t.Script != "" {
+		text, _ := s.runScriptTask(ctx, t)
+		return text, nil
+	}
 	header := taskHeader(t)
 	chat, err := s.Store.Chat(ctx, t.Platform, t.ChatID)
 	if err != nil {
@@ -721,6 +759,23 @@ func (s *Service) taskCreateRawCron(ctx context.Context, in platform.Inbound, cr
 	if prompt == "" {
 		return "用法：`/task cron <分> <时> <日> <月> <周> <指令内容>`", nil
 	}
+	return s.taskCreateCron(ctx, in, cronFields, prompt, "")
+}
+
+// taskCreateScript creates a cron task that runs a local script instead of a Grok prompt.
+func (s *Service) taskCreateScript(ctx context.Context, in platform.Inbound, cronFields []string, rawPath, desc string) (string, error) {
+	real, err := s.CheckScript(rawPath)
+	if err != nil {
+		return "⚠️ " + err.Error(), nil
+	}
+	desc = strings.TrimSpace(desc)
+	if desc == "" {
+		desc = "运行脚本 " + filepath.Base(real)
+	}
+	return s.taskCreateCron(ctx, in, cronFields, desc, real)
+}
+
+func (s *Service) taskCreateCron(ctx context.Context, in platform.Inbound, cronFields []string, prompt, script string) (string, error) {
 	existing, err := s.Store.AllTasks(ctx)
 	if err != nil {
 		return "", err
@@ -751,12 +806,49 @@ func (s *Service) taskCreateRawCron(ctx context.Context, in platform.Inbound, cr
 		Prompt:   prompt,
 		Summary:  summary,
 		NextRun:  next,
+		Script:   script,
 	})
 	if err != nil {
 		return "", err
 	}
 	warn := s.syncScheduler(ctx)
-	return fmt.Sprintf("已创建 #%d：%s。下次执行：%s。", id, summary, next.In(s.location()).Format("01-02 15:04")) + warn, nil
+	reply := fmt.Sprintf("已创建 #%d：%s。下次执行：%s。", id, summary, next.In(s.location()).Format("01-02 15:04"))
+	if script != "" {
+		reply += "\n📜 脚本任务：" + script + "（到点直接运行，不调用 Grok；成功时由脚本自行推送，失败时机器人推送告警）"
+	}
+	return reply + warn, nil
+}
+
+// taskBindScript turns an existing task into a script task (or back into a prompt task when
+// rawPath is empty), keeping its schedule, so it stays manageable with /task and natural language.
+func (s *Service) taskBindScript(ctx context.Context, rawID, rawPath string) (string, error) {
+	id, err := strconv.ParseInt(strings.TrimPrefix(strings.TrimSpace(rawID), "#"), 10, 64)
+	if err != nil || id <= 0 {
+		return "任务编号不对，可发 /task list 查看。", nil
+	}
+	t, ok, err := s.Store.TaskByID(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return fmt.Sprintf("没有 #%d 这个定时任务，可发 /task list 查看。", id), nil
+	}
+	real := ""
+	if rawPath != "" {
+		if real, err = s.CheckScript(rawPath); err != nil {
+			return "⚠️ " + err.Error(), nil
+		}
+	} else if t.Script == "" {
+		return fmt.Sprintf("#%d 本来就是 Grok 指令任务。", id), nil
+	}
+	if _, err := s.Store.SetTaskScript(ctx, id, real); err != nil {
+		return "", err
+	}
+	warn := s.syncScheduler(ctx)
+	if real == "" {
+		return fmt.Sprintf("已将 #%d（%s）恢复为 Grok 指令任务。", id, t.Summary) + warn, nil
+	}
+	return fmt.Sprintf("已将 #%d（%s）绑定为脚本任务：%s\n到点直接运行脚本（不调用 Grok、不占会话），时间与暂停/跳过/修改等管理方式不变。", id, t.Summary, real) + warn, nil
 }
 
 type taskTarget struct {

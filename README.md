@@ -121,6 +121,23 @@ centurion-live status | /home/grok/grok-bot/grok-bot send
 - 一次性任务执行后自动从数据库和系统调度器中移除。停机期间错过的执行不补跑；错过的一次性任务会提示后删除。
 - 时区由 `TIMEZONE` 决定。最多保存 `TASK_LIMIT` 个任务，周期任务间隔不少于 `TASK_MIN_INTERVAL`。
 
+#### 脚本任务（`/task script` / `/task bind`）
+
+耗时较长或逻辑固定的任务（下单、抓取、报表等）可以改由本机脚本执行，同时仍在 `/task` 里统一管理（列表、试跑、暂停/恢复、跳过、改时间、删除，自然语言同样有效）：
+
+```text
+/task script 59 7 * * 1-5 /home/grok/bin/auto_breakfast.py 工作日早餐下单   # 新建脚本任务（5 段 Cron + 脚本绝对路径 + 可选说明）
+/task bind 3 /home/grok/bin/auto_breakfast.py                              # 把已有的 #3 改为运行脚本，时间不变
+/task unbind 3                                                             # 恢复为 Grok 指令任务
+```
+
+- 到点仍由系统调度器调起 `grok-bot run-task <编号>`，发现是脚本任务就直接运行脚本：**不调用 Grok、不占聊天会话、不消耗额度**。`.py` 用 `python3`，`.sh` 用 `/bin/sh`，其他文件需自身可执行；工作目录为脚本所在目录，单次最长 `SCRIPT_TIMEOUT`（默认 `30m`）。
+- **只允许 `SCRIPT_DIRS` 内的脚本**（默认服务用户的 `~/bin`，多个目录用逗号分隔）；软链接按真实路径检查，拒绝所有用户可写（world-writable）的文件，每次执行前重新校验。脚本只能通过你本人发送的 `/task script` / `/task bind` 命令绑定，Grok 解析自然语言时不能创建或更换脚本。
+- 成功时机器人不额外推送（由脚本自己用 `"$GROK_BOT_BIN" send` 推送结果）；退出码非 0 或超时时，机器人把末尾输出作为告警同时推送到 TG 与 Discord。完整输出写入 `<DATA_DIR>/task-logs/task-<编号>.log`（满 2MB 轮转为 `.1`）。
+- 脚本环境**不含** `TELEGRAM_BOT_TOKEN`、`DISCORD_BOT_TOKEN` 和允许名单，额外提供 `GROK_BOT_BIN`、`BOT_ENV_FILE`、`DATA_DIR`、`GROK_BOT_TASK_ID`，脚本调用 `grok-bot send` 无需任何 Token。
+- 在聊天里点「▶️ 试跑」时脚本在后台运行，结果完成后推送，不阻塞当前会话。注意：试跑会**真实执行**脚本（例如真实下单）。
+- 脚本路径不能包含空格。
+
 ### 进度消息
 
 普通聊天消息收到后，bot 先回一条「处理中…」，Grok 每次搜索或调用工具时把它改成「正在搜索：…」「正在调用：…」，最多每 3 秒改一次。完成后这条消息直接变成回答；回答太长时第一段沿用这条消息，后面的段落另发并引用原消息。出错时这条消息改成错误提示。编辑失败会改为发新消息。命令和定时任务不显示进度。
@@ -197,6 +214,8 @@ BOT_ENV_FILE=/etc/grok-tg-bot.env
 TIMEZONE=Asia/Shanghai
 TASK_LIMIT=20
 TASK_MIN_INTERVAL=60m
+SCRIPT_DIRS=/home/grok/bin
+SCRIPT_TIMEOUT=30m
 ```
 
 两个平台可以只填其中一个。填了哪个平台，就要填它的允许名单。名单可以写多个，用逗号分开。聊天记录、当前模型和 Grok 会话 ID 存在 `DATA_DIR/bot.db`。

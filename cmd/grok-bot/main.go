@@ -220,6 +220,10 @@ func main() {
 		Location:            cfg.Location,
 		TaskLimit:           cfg.TaskLimit,
 		TaskMinInterval:     cfg.TaskMinInterval,
+		ScriptDirs:          cfg.ScriptDirs,
+		ScriptTimeout:       cfg.ScriptTimeout,
+		ScriptLogDir:        filepath.Join(dataDir, "task-logs"),
+		ScriptEnv:           scriptTaskEnv(dataDir, activeEnvFile),
 		Scheduler:           schedBackend,
 		SchedulerInitErr:    schedInitErr,
 	}
@@ -361,6 +365,25 @@ func resolveActiveEnvFile(loadedEnv, flagEnv, cfgEnv string, exeDirs []string) s
 		}
 	}
 	return ""
+}
+
+// scriptTaskEnv tells script tasks where this grok-bot and its config live, so a script can
+// push results with "$GROK_BOT_BIN" send without any token of its own (paths only, no secrets).
+func scriptTaskEnv(dataDir, envFile string) []string {
+	var env []string
+	if exe, err := os.Executable(); err == nil && exe != "" {
+		if real, err := filepath.EvalSymlinks(exe); err == nil && real != "" {
+			exe = real
+		}
+		env = append(env, "GROK_BOT_BIN="+exe)
+	}
+	if envFile != "" {
+		env = append(env, "BOT_ENV_FILE="+envFile)
+	}
+	if dataDir != "" {
+		env = append(env, "DATA_DIR="+dataDir)
+	}
+	return env
 }
 
 func buildSystemScheduler(home, dataDir, envFile string) (schedule.Backend, error) {
