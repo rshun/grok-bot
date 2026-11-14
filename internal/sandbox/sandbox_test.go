@@ -206,3 +206,23 @@ func TestSyncWithoutBwrapDropsDenyList(t *testing.T) {
 		t.Fatalf("deny list not restored once bwrap exists:\n%s", raw)
 	}
 }
+
+func TestCheckDirRejectsBotBinParent(t *testing.T) {
+	p := testPolicy(t)
+	binDir := filepath.Join(t.TempDir(), "app", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	botBin := filepath.Join(binDir, "grok-bot")
+	if err := os.WriteFile(botBin, []byte("binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p.BotBin = botBin
+
+	if got, err := p.CheckDir(binDir); err == nil {
+		t.Fatalf("accepted bot binary dir as %q", got)
+	}
+	if got, err := p.CheckDir(filepath.Dir(binDir)); err == nil {
+		t.Fatalf("accepted parent of bot binary dir as %q", got)
+	}
+}

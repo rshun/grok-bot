@@ -53,6 +53,9 @@ func statusButtons() [][]platform.Button {
 			{Label: "🔌 MCP 诊断", Command: "/mcp doctor", Style: platform.ButtonSecondary},
 			{Label: "🤖 切换模型", Command: "/model", Style: platform.ButtonPrimary},
 		},
+		{
+			{Label: "⬆️ 检查更新", Command: "/upgrade", Style: platform.ButtonSecondary},
+		},
 	}
 }
 

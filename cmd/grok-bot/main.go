@@ -9,7 +9,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/rshun/grok-bot/internal/actions"
 	"github.com/rshun/grok-bot/internal/config"
@@ -22,11 +24,13 @@ import (
 	"github.com/rshun/grok-bot/internal/sandbox"
 	"github.com/rshun/grok-bot/internal/schedule"
 	"github.com/rshun/grok-bot/internal/store"
+	"github.com/rshun/grok-bot/internal/upgrade"
 )
 
 var version = "dev"
 
 func main() {
+	exePaths := upgrade.SnapshotExecutable()
 	inv, err := parseCLI(os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err.Error()+"\n\n"+cliUsage)
@@ -109,6 +113,7 @@ func main() {
 		MediaDir: mediaDir,
 		EnvFile:  cfg.EnvFile,
 		AuthPath: cfg.AuthPath,
+		BotBin:   exePaths.TargetPath,
 	}
 	if inv.Mode == modePush {
 		var db *store.Store
@@ -206,6 +211,7 @@ func main() {
 		Store:               db,
 		Engine:              engine,
 		AllowedUsers:        map[string]map[string]struct{}{},
+		AdminUsers:          map[string]map[string]struct{}{},
 		QueueLimit:          cfg.QueueLimit,
 		Version:             cfg.Version,
 		WebSearch:           cfg.WebSearch,
@@ -226,6 +232,12 @@ func main() {
 		ScriptEnv:           scriptTaskEnv(dataDir, activeEnvFile),
 		Scheduler:           schedBackend,
 		SchedulerInitErr:    schedInitErr,
+		BackupDir:           filepath.Join(dataDir, "backups"),
+		Upgrader: &upgrade.Upgrader{
+			CurrentVersion: cfg.Version,
+			Paths:          exePaths,
+			DataDir:        dataDir,
+		},
 	}
 	type runner struct {
 		name string
@@ -243,6 +255,9 @@ func main() {
 			os.Exit(1)
 		}
 		svc.AllowedUsers[platform.Telegram] = cfg.TelegramUsers
+		if len(cfg.TelegramAdmins) > 0 {
+			svc.AdminUsers[platform.Telegram] = cfg.TelegramAdmins
+		}
 		svc.Senders[platform.Telegram] = bot
 		logArgs = append(logArgs, "telegram", bot.Username())
 		runners = append(runners, runner{name: "telegram", run: func(ctx context.Context) error {
@@ -256,14 +271,22 @@ func main() {
 			os.Exit(1)
 		}
 		svc.AllowedUsers[platform.Discord] = cfg.DiscordUsers
+		if len(cfg.DiscordAdmins) > 0 {
+			svc.AdminUsers[platform.Discord] = cfg.DiscordAdmins
+		}
 		svc.Senders[platform.Discord] = bot
 		logArgs = append(logArgs, "discord", bot.Username())
 		runners = append(runners, runner{name: "discord", run: func(ctx context.Context) error {
 			return bot.Run(ctx, svc.Handle)
 		}})
 	}
+	var restartRequested atomic.Bool
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	svc.OnUpgradeRestart = func() {
+		restartRequested.Store(true)
+		stop()
+	}
 	if actionsForSvc != nil {
 		go func() {
 			if err := actionsForSvc.Serve(ctx); err != nil {
@@ -280,6 +303,14 @@ func main() {
 	}
 	svc.InitScheduler(ctx)
 	slog.Info("listening", logArgs...)
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(1500 * time.Millisecond):
+			svc.DeliverPendingUpgradeNotice(ctx)
+		}
+	}()
 	errCh := make(chan error, len(runners))
 	for _, item := range runners {
 		go func(item runner) {
@@ -298,6 +329,26 @@ func main() {
 		if err := <-errCh; err != nil {
 			failed = true
 		}
+	}
+	if restartRequested.Load() {
+		if actionsForSvc != nil {
+			_ = actionsForSvc.Close()
+		}
+		_ = db.Close()
+		if taskLogFile != nil {
+			_ = taskLogFile.Close()
+		}
+		engine.ResetLeader(context.Background())
+		launch := exePaths.LaunchPath
+		if launch == "" {
+			launch = exePaths.TargetPath
+		}
+		slog.Info("restarting upgraded binary", "path", launch)
+		if err := upgrade.RestartProcess(launch, os.Args, os.Environ()); err != nil {
+			slog.Error("exec upgraded binary failed; exiting for service manager restart", "err", err)
+			os.Exit(upgrade.ExitCodeUpgrade)
+		}
+		return
 	}
 	if failed {
 		os.Exit(1)

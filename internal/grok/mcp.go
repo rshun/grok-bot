@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -50,6 +51,114 @@ func (c *Client) Version(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return firstLine(out), nil
+}
+
+// CLIUpdateResult describes the outcome of running `grok update`.
+type CLIUpdateResult struct {
+	TargetPath    string
+	BeforeVersion string
+	AfterVersion  string
+	Output        string
+	Updated       bool
+}
+
+// CheckUpdatePreflight resolves the physical grok CLI path and verifies that its parent
+// directory is writable by the current service user.
+func (c *Client) CheckUpdatePreflight() (string, error) {
+	if strings.TrimSpace(c.Bin) == "" {
+		return "", errors.New("未配置 Grok CLI 可执行文件路径")
+	}
+	looked, err := exec.LookPath(c.Bin)
+	if err != nil {
+		return "", fmt.Errorf("未找到 Grok CLI 可执行文件 (%s)", c.Bin)
+	}
+	absPath, err := filepath.Abs(looked)
+	if err != nil {
+		absPath = looked
+	}
+	targetPath := absPath
+	if real, symErr := filepath.EvalSymlinks(absPath); symErr == nil && real != "" {
+		targetPath = real
+	}
+	dir := filepath.Dir(targetPath)
+	f, err := os.CreateTemp(dir, ".grok-cli-writecheck-*")
+	if err != nil {
+		return targetPath, fmt.Errorf("当前运行账户对 Grok CLI 所在目录 (%s) 无写入权限，请在服务器终端手动执行 grok update", dir)
+	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
+	return targetPath, nil
+}
+
+// UpdateCLI upgrades the local grok CLI outside any AI sandbox and refreshes the leader daemon.
+func (c *Client) UpdateCLI(ctx context.Context) (CLIUpdateResult, error) {
+	targetPath, err := c.CheckUpdatePreflight()
+	if err != nil {
+		return CLIUpdateResult{TargetPath: targetPath}, err
+	}
+	beforeVer, _ := c.Version(ctx)
+	c.ResetLeader(ctx)
+
+	runCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(runCtx, c.Bin, "update")
+	cmd.Env = envForCLIUpdate()
+	cmd.Stdin = nil
+	if home, homeErr := os.UserHomeDir(); homeErr == nil && home != "" {
+		cmd.Dir = home
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	// Always reset the leader daemon afterwards so the next chat turn starts the fresh binary.
+	c.ResetLeader(context.Background())
+
+	combined := strings.TrimSpace(stdout.String())
+	if combined == "" {
+		combined = strings.TrimSpace(stderr.String())
+	} else if se := strings.TrimSpace(stderr.String()); se != "" {
+		combined = combined + "\n" + se
+	}
+	sanitized := clipRunes(RedactSensitive(combined), 600)
+
+	if runErr != nil {
+		if runCtx.Err() != nil {
+			return CLIUpdateResult{TargetPath: targetPath, BeforeVersion: beforeVer, Output: sanitized}, runCtx.Err()
+		}
+		detail := firstLine(RedactSensitive(stderr.String()))
+		if detail == "" {
+			detail = firstLine(RedactSensitive(stdout.String()))
+		}
+		if detail != "" {
+			return CLIUpdateResult{TargetPath: targetPath, BeforeVersion: beforeVer, Output: sanitized}, &RunError{Message: detail}
+		}
+		return CLIUpdateResult{TargetPath: targetPath, BeforeVersion: beforeVer, Output: sanitized}, runErr
+	}
+
+	afterVer, _ := c.Version(ctx)
+	updated := (beforeVer != "" && afterVer != "" && beforeVer != afterVer) || (beforeVer == "" && afterVer != "")
+	return CLIUpdateResult{
+		TargetPath:    targetPath,
+		BeforeVersion: beforeVer,
+		AfterVersion:  afterVer,
+		Output:        sanitized,
+		Updated:       updated,
+	}, nil
+}
+
+func clipRunes(s string, limit int) string {
+	s = strings.TrimSpace(s)
+	if limit <= 0 {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= limit {
+		return s
+	}
+	return string(r[:limit]) + "…"
 }
 
 // MCPList returns configured MCP server names without exposing URLs or launch arguments.

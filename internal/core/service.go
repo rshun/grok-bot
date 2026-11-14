@@ -20,6 +20,7 @@ import (
 	"github.com/rshun/grok-bot/internal/sandbox"
 	"github.com/rshun/grok-bot/internal/schedule"
 	"github.com/rshun/grok-bot/internal/store"
+	"github.com/rshun/grok-bot/internal/upgrade"
 )
 
 // emptyReplyText is shown when a turn finishes without any answer text.
@@ -38,8 +39,10 @@ type Service struct {
 	Engine Engine
 	// AllowedUsers maps a platform name to the user IDs that may talk to the bot there.
 	AllowedUsers map[string]map[string]struct{}
-	QueueLimit   int
-	Version      string
+	// AdminUsers optionally restricts administrative actions (such as /upgrade) to specific user IDs per platform.
+	AdminUsers map[string]map[string]struct{}
+	QueueLimit int
+	Version    string
 	// WebSearch lets Grok search the web and open pages during chat turns.
 	WebSearch bool
 	// DisableLinkPrefetch turns off automatic URL / GitHub / X / webpage pre-fetching in user messages.
@@ -90,11 +93,21 @@ type Service struct {
 	ImageLoadTimeout time.Duration
 	// Now is the clock for scheduling; nil means time.Now.
 	Now func() time.Time
+	// Upgrader inspects and replaces the grok-bot executable when /upgrade is invoked.
+	Upgrader *upgrade.Upgrader
+	// BackupDir stores online SQLite backups created prior to self-upgrades (<DATA_DIR>/backups).
+	BackupDir string
+	// DrainTimeout bounds how long /upgrade waits for other active sessions to finish; 0 means 60s.
+	DrainTimeout time.Duration
+	// OnUpgradeRestart is invoked after an in-place binary upgrade reply has been delivered.
+	OnUpgradeRestart func()
 
-	mu           sync.Mutex
-	lanes        map[string]*lane
-	dmChannels   map[string]string
-	lastSchedErr error
+	mu             sync.Mutex
+	lanes          map[string]*lane
+	dmChannels     map[string]string
+	lastSchedErr   error
+	upgrading      atomic.Bool
+	restartPending atomic.Bool
 }
 
 type lane struct {
@@ -126,6 +139,10 @@ func (s *Service) Handle(ctx context.Context, in platform.Inbound, out platform.
 		return
 	}
 	s.rememberChat(in.Platform, in.ChatID)
+	if s.upgrading.Load() {
+		s.send(ctx, out, in.ChatID, "机器人正在执行版本升级与重启，请约 5～10 秒后再试。")
+		return
+	}
 	if !in.TextMessage {
 		s.send(ctx, out, in.ChatID, unsupportedText)
 		return
@@ -312,6 +329,12 @@ func (s *Service) dispatch(it item) {
 		slog.Error("chat turn failed", "chat", it.in.ChatID, "err", err)
 		reply, quiet, files, buttons = grok.UserFacing(err), false, nil, nil
 	}
+	// If an in-place upgrade completed on this turn, trigger restart only after the reply and files are sent.
+	defer func() {
+		if s.restartPending.CompareAndSwap(true, false) && s.OnUpgradeRestart != nil {
+			s.OnUpgradeRestart()
+		}
+	}()
 	// The answer is shown first; the files follow it, each quoting the user's message.
 	defer func() { s.flushFiles(baseCtx, it.out, it.in.ChatID, it.in.MessageID, files) }()
 	if strings.TrimSpace(reply) == "" {
@@ -352,6 +375,12 @@ func (s *Service) answerWithButtons(ctx context.Context, in platform.Inbound, ou
 	if cmd, arg, ok := parseInboundCommand(in); ok {
 		text, files, buttons, err = s.command(ctx, in, out, cmd, arg, onTool)
 		return text, false, files, buttons, err
+	}
+	if len(in.Images) == 0 && len(in.Files) == 0 {
+		if upgFocus, ok := parseNaturalUpgradeIntent(in.Text); ok {
+			text, buttons, err = s.upgradeCommand(ctx, in, out, upgFocus)
+			return text, false, nil, buttons, err
+		}
 	}
 	if media.HasImageRequestIntent(in.Text) {
 		if safetyErr := media.CheckPromptSafety(in.Text); safetyErr != nil {
@@ -406,6 +435,9 @@ func (s *Service) command(ctx context.Context, in platform.Inbound, out platform
 		return helpText(s.Version), nil, nil, nil
 	case "/status":
 		text, btns, err := s.statusCommand(ctx, in)
+		return text, nil, btns, err
+	case "/upgrade", "/update":
+		text, btns, err := s.upgradeCommand(ctx, in, out, arg)
 		return text, nil, btns, err
 	case "/stop", "/cancel":
 		return "当前没有正在执行的任务。", nil, nil, nil
@@ -761,6 +793,8 @@ func helpText(version string) string {
 
 /status
     查看运行状态、权限开关与 MCP 列表概览（附快捷按钮）
+/upgrade [bot|cli]
+    检查并升级 grok-bot 机器人或本机 Grok CLI 引擎（附二次确认按钮）
 /stop
     立即中断当前正在执行的对话或任务
 /new [备注]

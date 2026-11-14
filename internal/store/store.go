@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -442,6 +443,57 @@ func (s *Store) PutSetting(ctx context.Context, key, value string) error {
 		`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
 		key, value)
 	return err
+}
+
+// DeleteSetting removes a persisted key-value setting if present.
+func (s *Store) DeleteSetting(ctx context.Context, key string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM settings WHERE key = ?`, key)
+	return err
+}
+
+// Backup writes a transaction-consistent online snapshot of bot.db (including WAL frames)
+// into backupDir using SQLite VACUUM INTO and returns the created backup file path.
+func (s *Store) Backup(ctx context.Context, backupDir, label string) (string, error) {
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
+		return "", fmt.Errorf("create backup dir: %w", err)
+	}
+	absDir, err := filepath.Abs(backupDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve backup dir: %w", err)
+	}
+	cleanLabel := sanitizeBackupLabel(label)
+	stamp := time.Now().UTC().Format("20060102-150405")
+	baseName := "bot.db.bak-" + stamp
+	if cleanLabel != "" {
+		baseName = "bot.db.bak-" + cleanLabel + "-" + stamp
+	}
+	dest := filepath.Join(absDir, baseName)
+	for seq := 1; seq < 100; seq++ {
+		if _, statErr := os.Stat(dest); os.IsNotExist(statErr) {
+			break
+		}
+		dest = fmt.Sprintf("%s.%d", filepath.Join(absDir, baseName), seq)
+	}
+	escaped := strings.ReplaceAll(dest, "'", "''")
+	if _, err := s.db.ExecContext(ctx, "VACUUM INTO '"+escaped+"'"); err != nil {
+		return "", fmt.Errorf("sqlite vacuum into backup: %w", err)
+	}
+	_ = os.Chmod(dest, 0o600)
+	return dest, nil
+}
+
+func sanitizeBackupLabel(raw string) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(raw) {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_':
+			b.WriteRune(r)
+		}
+		if b.Len() >= 32 {
+			break
+		}
+	}
+	return strings.Trim(b.String(), ".-_")
 }
 
 // AddMemory stores a persistent memory for one chat if not already present, returning its ID and whether it was newly added.

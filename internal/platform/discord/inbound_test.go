@@ -72,6 +72,18 @@ func TestCommandText(t *testing.T) {
 	if got != "/model grok-4.6" {
 		t.Fatalf("%q", got)
 	}
+	if got := commandText(discordgo.ApplicationCommandInteractionData{Name: "upgrade"}); got != "/upgrade" {
+		t.Fatalf("%q", got)
+	}
+	gotUpg := commandText(discordgo.ApplicationCommandInteractionData{
+		Name: "upgrade",
+		Options: []*discordgo.ApplicationCommandInteractionDataOption{
+			{Name: "target", Type: discordgo.ApplicationCommandOptionString, Value: "bot"},
+		},
+	})
+	if gotUpg != "/upgrade bot" {
+		t.Fatalf("%q", gotUpg)
+	}
 }
 
 func TestCommandTextSubcommands(t *testing.T) {

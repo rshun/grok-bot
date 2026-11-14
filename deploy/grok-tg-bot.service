@@ -10,6 +10,7 @@ User=grok
 EnvironmentFile=/etc/grok-tg-bot.env
 ExecStart=/usr/local/bin/grok-tg-bot
 Restart=on-failure
+RestartForceExitStatus=42
 RestartSec=3
 
 [Install]

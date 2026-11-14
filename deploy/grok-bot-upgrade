@@ -1,0 +1,67 @@
+#!/bin/sh
+# Root-owned zero-argument helper for `/upgrade` in restricted sudoers mode:
+#   sudo install -o root -g root -m 0755 deploy/grok-bot-upgrade /usr/local/sbin/grok-bot-upgrade
+#   echo 'grok ALL=(root) NOPASSWD: /usr/local/sbin/grok-bot-upgrade' | sudo tee /etc/sudoers.d/grok-tg-bot && sudo chmod 0440 /etc/sudoers.d/grok-tg-bot
+set -eu
+
+if [ "$#" -ne 0 ]; then
+	echo "grok-bot-upgrade takes no arguments" >&2
+	exit 2
+fi
+
+repo="rshun/grok-bot"
+service="grok-tg-bot"
+
+exec_line="$(systemctl show -p ExecStart --value "$service" 2>/dev/null || true)"
+exe_path="$(printf '%s\n' "$exec_line" | sed -n 's/.*path=\([^ ;]*\).*/\1/p')"
+if [ -z "$exe_path" ]; then
+	exe_path="/usr/local/bin/grok-tg-bot"
+fi
+target_path="$(readlink -f "$exe_path")"
+target_dir="$(dirname "$target_path")"
+
+case "$(uname -m)" in
+	x86_64|amd64)
+		asset="grok-bot-linux-amd64"
+		;;
+	aarch64|arm64)
+		asset="grok-bot-linux-arm64"
+		;;
+	*)
+		echo "unsupported architecture: $(uname -m)" >&2
+		exit 1
+		;;
+esac
+
+base_url="https://github.com/${repo}/releases/latest/download"
+tmp_sums="$(mktemp "${target_dir}/.grok-bot-sums.XXXXXX")"
+tmp_bin="$(mktemp "${target_dir}/.grok-bot-bin.XXXXXX")"
+cleanup() {
+	rm -f "$tmp_sums" "$tmp_bin"
+}
+trap cleanup EXIT
+
+curl -fsSL --max-time 30 "${base_url}/SHA256SUMS" -o "$tmp_sums"
+expected_sha="$(awk -v name="$asset" '$2 == name || $2 == "*"name { print tolower($1); exit }' "$tmp_sums")"
+if [ "${#expected_sha}" -ne 64 ]; then
+	echo "missing valid SHA256 entry for ${asset}" >&2
+	exit 1
+fi
+
+curl -fsSL --max-time 300 "${base_url}/${asset}" -o "$tmp_bin"
+actual_sha="$(sha256sum "$tmp_bin" | awk '{ print tolower($1) }')"
+if [ "$actual_sha" != "$expected_sha" ]; then
+	echo "SHA256 mismatch for ${asset}" >&2
+	exit 1
+fi
+
+if [ -f "$target_path" ]; then
+	cp -f "$target_path" "${target_path}.bak"
+	chmod 0755 "${target_path}.bak"
+fi
+chmod 0755 "$tmp_bin"
+mv -f "$tmp_bin" "$target_path"
+rm -f "$tmp_sums"
+trap - EXIT
+
+exec systemctl restart "$service"
