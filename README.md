@@ -114,8 +114,10 @@ sudo systemctl enable --now grok-tg-bot
 | :--- | :---: | :--- | :--- |
 | `TELEGRAM_BOT_TOKEN` | 二选一 | - | Telegram 机器人 Token（与 `DISCORD_BOT_TOKEN` 至少填一个） |
 | `ALLOWED_USER_IDS` | 配 TG 必填 | - | 允许访问的 Telegram 数字用户 ID，多个用英文逗号分隔 |
+| `ADMIN_USER_IDS` | 否 | 单用户自动授权 | 允许执行 `/upgrade` 等管理操作的 Telegram 管理员用户 ID（多用户共享时必填） |
 | `DISCORD_BOT_TOKEN` | 二选一 | - | Discord 机器人 Token |
 | `DISCORD_ALLOWED_USER_IDS` | 配 DC 必填 | - | 允许访问的 Discord 数字用户 ID，多个用英文逗号分隔 |
+| `DISCORD_ADMIN_USER_IDS` | 否 | 单用户自动授权 | 允许执行 `/upgrade` 等管理操作的 Discord 管理员用户 ID（多用户共享时必填） |
 | `DATA_DIR` | 否 | `data` | SQLite 数据库（`bot.db`）、工作区与任务日志存储目录 |
 | `BOT_ENV_FILE` | 否 | `/etc/grok-tg-bot.env` | 环境配置文件路径（自动加入沙箱与发文件黑名单） |
 | `DEFAULT_MODEL` | 否 | `grok-4.7` | 新会话默认使用的 Grok 模型名称 |
@@ -142,6 +144,7 @@ sudo systemctl enable --now grok-tg-bot
 | 命令 | 用法与说明 |
 | :--- | :--- |
 | `/status` | 查看运行状态、版本、调度器状态、权限开关、数据统计与 MCP 概览（附快捷操作面板按钮） |
+| `/upgrade [bot\|cli]` | 检查并一键升级 `grok-bot` 机器人自身或官方 `Grok CLI`（二次按钮确认、自动备份 `bot.db`、强制 `SHA256` 校验与重启回执） |
 | `/stop` | 立即中断当前正在运行的对话或长任务（同 `/cancel`，或运行中直接发「停止」「停一下」） |
 | `/new [备注]` | 归档当前会话并开启新话题（长期记忆继续保留，附一键切回按钮） |
 | `/sessions` | 查看跨平台保存的历史会话；`/sessions <编号>` 一键切换/跨端接力；`/sessions del <编号>` 删除归档 |
@@ -237,7 +240,7 @@ df -h | grok-bot send
 - **环境变量隔离**：`grok-bot` 启动 `grok` 子进程前会剥离 `TELEGRAM_BOT_TOKEN`、`DISCORD_BOT_TOKEN`、允许名单、`BOT_ENV_FILE` 等敏感变量，即使子进程读取 `/proc/self/environ` 也无法获取机器人凭证。
 - **目录读写控制（Linux / macOS）**：
   - **读取**：受操作系统用户权限与沙箱黑名单双重控制。`~/.grok/auth.json`、`~/.ssh`、`BOT_ENV_FILE`、`bot.db`、所有 `*.env` 与 `*.pem` 私钥文件一律禁止读取与外发。
-  - **写入**：默认只读。必须由你本人在聊天中发送 `/dir add rw /srv/out` 或明确说「允许写入 `/srv/out`」才会持久化授权（严禁授权 `/`、`/etc`、`/proc`、`/sys`、`/root`、`~/.grok`、`~/.ssh`、`DATA_DIR` 等敏感路径）。
+  - **写入**：默认只读。必须由你本人在聊天中发送 `/dir add rw /srv/out` 或明确说「允许写入 `/srv/out`」才会持久化授权（严禁授权 `/`、`/etc`、`/proc`、`/sys`、`/root`、`~/.grok`、`~/.ssh`、`DATA_DIR` 及 `grok-bot` 自身二进制所在目录等敏感路径）。
   - **沙箱配置托管**：自动维护 `~/.grok/sandbox.toml`（首行标记 `# managed by grok-bot; do not edit`，若已存在手动配置则绝不覆盖）。若 Linux 未安装 `bubblewrap`（`bwrap`），机器人会自动省略 `--sandbox` 降级运行并依靠系统用户权限、提示词约束及发文件黑名单兜底；安装 `bubblewrap` 后新会话自动启用内核级沙箱（要求 Linux 内核 >= 5.13）。
 - **命令执行开关（`/shell`）**：默认关闭（`ALLOW_SHELL=false`），需要时可通过 `/shell on` 临时开启，用完建议 `/shell off` 关闭。
 - **本地一次性 MCP 通道**：表情回应、发文件、标准发音与安全找图通过监听在 `127.0.0.1` 随机端口的内置 MCP 服务实现（配置写入独立的 `DATA_DIR/workspace/.grok/config.toml`，不改动全局 `~/.grok/config.toml`），每轮对话签发一次性随机令牌且仅限操作当前会话。
@@ -251,7 +254,16 @@ df -h | grok-bot send
 
 #### 平滑升级与备份
 
-升级前建议先备份 `bot.db` 数据库（升级仅替换二进制程序，会话上下文、长期记忆与定时任务均完整保留）：
+##### 方式一：聊天内一键安全自升级（`/upgrade`）
+
+管理员可直接发送 `/upgrade`（或说「检查更新」「升级机器人」「更新 CLI」），通过内联确认按钮单独或同时升级 **官方 `Grok CLI`** 与 **`grok-bot` 主程序**：
+- 自动通过 `VACUUM INTO` 在 `<DATA_DIR>/backups/` 生成事务一致的 `bot.db` 在线备份，并保留旧版二进制 `.bak`；
+- 强制校验官方 GitHub Releases 的 `SHA256SUMS` 与可执行文件头，等待其他进行中的会话收尾后平滑重启并在重启完成后主动推送回执；
+- 若 Linux 服务以低权限用户运行且 `/usr/local/bin/grok-tg-bot` 为 `root` 只读，可将实际二进制软链接托管至 `<DATA_DIR>/bin/`（免 `sudo` 原地升级），或配置受限零参数脚本 `deploy/grok-bot-upgrade`（`/upgrade` 面板会自动检测并给出对应指引）。
+
+##### 方式二：服务器命令行手动升级
+
+升级仅替换二进制程序，会话上下文、长期记忆与定时任务均完整保留：
 
 ```sh
 # 1. 停止服务并备份数据库
@@ -263,7 +275,7 @@ sudo sh deploy/upgrade.sh
 # 若手动替换二进制，执行：sudo systemctl start grok-tg-bot
 ```
 
-> `grok` CLI 本身可通过 `grok update` 独立更新。如需回滚，停止服务后恢复旧版二进制并重启即可。
+> `grok` CLI 也可在终端通过 `grok update` 独立更新。如需回滚，停止服务后恢复 `<二进制路径>.bak` 并重启即可。
 
 #### 离线回归测试
 
@@ -396,8 +408,10 @@ sudo systemctl enable --now grok-tg-bot
 | :--- | :---: | :--- | :--- |
 | `TELEGRAM_BOT_TOKEN` | Either | - | Telegram Bot token (at least one of Telegram or Discord is required) |
 | `ALLOWED_USER_IDS` | If TG enabled | - | Comma-separated numeric Telegram user IDs allowed to use the bot |
+| `ADMIN_USER_IDS` | No | Auto for single-owner | Comma-separated Telegram admin user IDs allowed to run `/upgrade` (required when multiple users share the bot) |
 | `DISCORD_BOT_TOKEN` | Either | - | Discord Bot token |
 | `DISCORD_ALLOWED_USER_IDS` | If DC enabled | - | Comma-separated numeric Discord user IDs allowed to use the bot |
+| `DISCORD_ADMIN_USER_IDS` | No | Auto for single-owner | Comma-separated Discord admin user IDs allowed to run `/upgrade` (required when multiple users share the bot) |
 | `DATA_DIR` | No | `data` | Directory for SQLite (`bot.db`), workspace, and task logs |
 | `BOT_ENV_FILE` | No | `/etc/grok-tg-bot.env` | Path to the bot `.env` file (automatically blocked from Grok reads/sends) |
 | `DEFAULT_MODEL` | No | `grok-4.7` | Default Grok model for new chat sessions |
@@ -424,6 +438,7 @@ All major commands include **interactive inline buttons** on both Telegram and D
 | Command | Description |
 | :--- | :--- |
 | `/status` | View bot version, runtime status, OS scheduler state, permission flags, stats, and MCP overview (with quick-action buttons) |
+| `/upgrade [bot\|cli]` | Check and safely upgrade `grok-bot` or the local `Grok CLI` with inline confirmation buttons, online SQLite backup, and SHA256 verification |
 | `/stop` | Immediately abort the currently running response or task (alias: `/cancel`, or send `"停止"` while running) |
 | `/new [note]` | Archive the current session and start a fresh topic (long-term memories remain intact; includes a one-click switch-back button) |
 | `/sessions` | List saved sessions across TG & Discord; `/sessions <id>` to switch or hand off cross-platform; `/sessions del <id>` to delete |
@@ -518,7 +533,7 @@ df -h | grok-bot send
 - **Child-Process Secret Scrubbing**: `TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN`, user allowlists, `DATA_DIR`, and `BOT_ENV_FILE` are stripped before spawning `grok`, preventing exposure via `/proc/self/environ`.
 - **Filesystem Access & Kernel Sandbox (Linux / macOS)**:
   - **Reads**: `~/.grok/auth.json`, `~/.ssh`, `BOT_ENV_FILE`, `bot.db`, `*.env`, and `*.pem` are strictly blocked from both Grok reads and file sends.
-  - **Writes**: Read-only by default. Persistent write access requires an explicit command (`/dir add rw /srv/out`) or direct user phrasing from an allowlisted user. System paths (`/`, `/etc`, `/proc`, `/sys`, `/root`, `~/.grok`, `~/.ssh`, `DATA_DIR`) can never be granted write access.
+  - **Writes**: Read-only by default. Persistent write access requires an explicit command (`/dir add rw /srv/out`) or direct user phrasing from an allowlisted user. System paths (`/`, `/etc`, `/proc`, `/sys`, `/root`, `~/.grok`, `~/.ssh`, `DATA_DIR`, and `grok-bot`'s own binary directory) can never be granted write access.
   - **Managed `sandbox.toml`**: `grok-bot` generates `~/.grok/sandbox.toml` (marked `# managed by grok-bot; do not edit`; never overwrites user-authored files). If `bubblewrap` (`bwrap`) is not installed on Linux, `grok-bot` gracefully omits `--sandbox` and relies on OS user permissions, prompt rules, and file-send deny lists; installing `bubblewrap` on Linux >= 5.13 automatically enables kernel sandboxing for new turns without restarting the daemon.
 - **Shell Execution Gate (`/shell`)**: Disabled by default (`ALLOW_SHELL=false`); toggleable via `/shell on` and `/shell off`.
 - **Ephemeral Per-Turn Local MCP**: Built-in actions (reactions, file sends, pronunciation, web images) run over a localhost random-port MCP server configured in `DATA_DIR/workspace/.grok/config.toml` with a single-turn random bearer token scoped strictly to the active chat.
@@ -532,7 +547,16 @@ df -h | grok-bot send
 
 #### Safe Upgrade & Backup
 
-Always back up `bot.db` before upgrading (replacing the binary preserves all sessions, memories, and scheduled tasks):
+##### Option 1: In-Chat One-Click Self-Upgrade (`/upgrade`)
+
+Authorized admins can send `/upgrade` (or ask `"check for updates"` / `"upgrade bot"` / `"update grok cli"`) to inspect versions and trigger one-click confirmed upgrades for **`Grok CLI`**, **`grok-bot`**, or both:
+- Automatically creates a WAL-consistent online SQLite snapshot under `<DATA_DIR>/backups/` via `VACUUM INTO` and keeps a `.bak` copy of the previous binary;
+- Verifies official GitHub Releases `SHA256SUMS` + executable magic headers, drains active conversations before restarting, and sends a completion receipt once back online;
+- On Linux `systemd` setups where `/usr/local/bin/grok-tg-bot` is root-owned read-only, either point `/usr/local/bin/grok-tg-bot` as a symlink to `<DATA_DIR>/bin/grok-tg-bot` (zero-`sudo` in-place upgrades) or install the zero-arg root helper `deploy/grok-bot-upgrade` (the `/upgrade` card detects permissions and shows exact setup guidance).
+
+##### Option 2: Manual Server CLI Upgrade
+
+Replacing the binary preserves all sessions, memories, and scheduled tasks:
 
 ```sh
 # 1. Stop service and back up SQLite database
@@ -543,7 +567,7 @@ sudo cp -p /var/lib/grok-tg-bot/bot.db /var/lib/grok-tg-bot/bot.db.bak-$(date +%
 sudo sh deploy/upgrade.sh
 ```
 
-> Update the underlying Grok CLI independently via `grok update`. To roll back, restore the previous `grok-bot` binary and restart the service.
+> Update the underlying Grok CLI independently via `grok update`. To roll back, restore `<binary>.bak` and restart the service.
 
 #### Offline Regression Tests
 

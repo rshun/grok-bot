@@ -48,6 +48,7 @@ type Policy struct {
 	MediaDir string
 	EnvFile  string
 	AuthPath string
+	BotBin   string
 }
 
 // Supported reports whether grok can enforce a sandbox on this OS.
@@ -92,9 +93,12 @@ func (p Policy) CheckDir(raw string) (string, error) {
 			return "", fmt.Errorf("不能开放 %s 及其上下级目录。", item)
 		}
 	}
-	// The env file only blocks the directories that contain it.
+	// The env file and bot executable only block the directories that contain them.
 	if p.EnvFile != "" && within(resolve(p.EnvFile), real) {
 		return "", fmt.Errorf("这个目录包含 bot 的环境文件，不能开放。")
+	}
+	if p.BotBin != "" && within(resolve(p.BotBin), real) {
+		return "", fmt.Errorf("这个目录包含 bot 的程序文件，不能开放。")
 	}
 	return real, nil
 }

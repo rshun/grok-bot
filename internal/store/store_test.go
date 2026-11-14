@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -359,6 +360,61 @@ func TestTaskTargetPlatformMigrateAndUpdate(t *testing.T) {
 	t2, _, _ = s.TaskByID(ctx, id2)
 	if t2.TargetPlatform != "" {
 		t.Fatalf("expected cleared target_platform, got %q", t2.TargetPlatform)
+	}
+}
+
+func TestDeleteSettingAndOnlineBackup(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+
+	if err := s.PutSetting(ctx, "pending_upgrade_notice", `{"to_version":"v0.9.2"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.AddGlobalMemory(ctx, "telegram", "1", "备份验证记忆"); err != nil {
+		t.Fatal(err)
+	}
+
+	backupDir := filepath.Join(t.TempDir(), "backups")
+	bakPath, err := s.Backup(ctx, backupDir, "v0.9.1")
+	if err != nil {
+		t.Fatalf("Backup: %v", err)
+	}
+	if !strings.Contains(filepath.Base(bakPath), "v0.9.1") {
+		t.Fatalf("unexpected backup name: %q", bakPath)
+	}
+
+	if err := s.DeleteSetting(ctx, "pending_upgrade_notice"); err != nil {
+		t.Fatalf("DeleteSetting: %v", err)
+	}
+	if _, ok, err := s.Setting(ctx, "pending_upgrade_notice"); err != nil || ok {
+		t.Fatalf("expected setting deleted, ok=%v err=%v", ok, err)
+	}
+
+	// Verify the online snapshot created BEFORE DeleteSetting still holds the consistent data.
+	restoreDir := filepath.Join(t.TempDir(), "restored")
+	if err := os.MkdirAll(restoreDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(bakPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(restoreDir, "bot.db"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := Open(restoreDir, "grok-4.7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+
+	val, ok, err := restored.Setting(ctx, "pending_upgrade_notice")
+	if err != nil || !ok || !strings.Contains(val, "v0.9.2") {
+		t.Fatalf("restored setting: %q ok=%v err=%v", val, ok, err)
+	}
+	mems, err := restored.AllMemories(ctx)
+	if err != nil || len(mems) != 1 || mems[0].Content != "备份验证记忆" {
+		t.Fatalf("restored memories: %#v %v", mems, err)
 	}
 }
 

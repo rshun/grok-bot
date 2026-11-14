@@ -64,6 +64,23 @@ func (b *Bot) registerCommands() error {
 	_, err := b.session.ApplicationCommandBulkOverwrite(b.userID, "", []*discordgo.ApplicationCommand{
 		{Name: "help", Description: "查看说明"},
 		{Name: "status", Description: "查看运行状态与 MCP 概览"},
+		{
+			Name:        "upgrade",
+			Description: "检查并升级 grok-bot 或 Grok CLI",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionString,
+					Name:        "target",
+					Description: "要检查或升级的组件（默认同时检查全部）",
+					Required:    false,
+					Choices: []*discordgo.ApplicationCommandOptionChoice{
+						{Name: "全部检查", Value: "check"},
+						{Name: "grok-bot 机器人", Value: "bot"},
+						{Name: "Grok CLI 引擎", Value: "cli"},
+					},
+				},
+			},
+		},
 		{Name: "stop", Description: "立即停止当前正在执行的任务"},
 		{Name: "usage", Description: "查看订阅剩余额度"},
 		{Name: "reset", Description: "清空这个聊天的上下文（长期记忆保留）"},
@@ -460,6 +477,15 @@ func commandText(data discordgo.ApplicationCommandInteractionData) string {
 			}
 		}
 		return "/shell"
+	case "upgrade":
+		for _, opt := range data.Options {
+			if opt.Name == "target" {
+				if target := strings.TrimSpace(opt.StringValue()); target != "" {
+					return "/upgrade " + target
+				}
+			}
+		}
+		return "/upgrade"
 	case "new":
 		for _, opt := range data.Options {
 			if opt.Name == "title" {

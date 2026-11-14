@@ -22,11 +22,13 @@ const (
 // Config is the process configuration. Secrets come from the environment,
 // which systemd loads from /etc/grok-tg-bot.env.
 type Config struct {
-	TelegramToken string
-	DiscordToken  string
-	TelegramUsers map[string]struct{}
-	DiscordUsers  map[string]struct{}
-	DataDir       string
+	TelegramToken  string
+	DiscordToken   string
+	TelegramUsers  map[string]struct{}
+	DiscordUsers   map[string]struct{}
+	TelegramAdmins map[string]struct{}
+	DiscordAdmins  map[string]struct{}
+	DataDir        string
 	DefaultModel  string
 	GrokBin       string
 	AuthPath      string
@@ -60,15 +62,25 @@ func Load() (Config, error) {
 	}
 	var allowed map[string]struct{}
 	var discordUsers map[string]struct{}
+	var tgAdmins map[string]struct{}
+	var discordAdmins map[string]struct{}
 	var err error
 	if token != "" {
 		allowed, err = parseUsers(os.Getenv("ALLOWED_USER_IDS"), "ALLOWED_USER_IDS", "Telegram")
 		if err != nil {
 			return Config{}, err
 		}
+		tgAdmins, err = parseOptionalUsers(os.Getenv("ADMIN_USER_IDS"), "ADMIN_USER_IDS", "Telegram")
+		if err != nil {
+			return Config{}, err
+		}
 	}
 	if discordToken != "" {
 		discordUsers, err = parseUsers(os.Getenv("DISCORD_ALLOWED_USER_IDS"), "DISCORD_ALLOWED_USER_IDS", "Discord")
+		if err != nil {
+			return Config{}, err
+		}
+		discordAdmins, err = parseOptionalUsers(os.Getenv("DISCORD_ADMIN_USER_IDS"), "DISCORD_ADMIN_USER_IDS", "Discord")
 		if err != nil {
 			return Config{}, err
 		}
@@ -193,6 +205,8 @@ func Load() (Config, error) {
 		DiscordToken:    discordToken,
 		TelegramUsers:   allowed,
 		DiscordUsers:    discordUsers,
+		TelegramAdmins:  tgAdmins,
+		DiscordAdmins:   discordAdmins,
 		DataDir:         dataDir,
 		DefaultModel:    model,
 		GrokBin:         bin,
@@ -231,6 +245,13 @@ func parseScriptDirs(raw, home string) []string {
 		}
 	}
 	return out
+}
+
+func parseOptionalUsers(raw, envName, platformName string) (map[string]struct{}, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	return parseUsers(raw, envName, platformName)
 }
 
 func parseUsers(raw, envName, platformName string) (map[string]struct{}, error) {

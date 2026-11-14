@@ -119,6 +119,7 @@ func (b *Bot) MarkReceived(ctx context.Context, in platform.Inbound) error {
 func (b *Bot) registerCommands() error {
 	cfg := tgbotapi.NewSetMyCommands(
 		tgbotapi.BotCommand{Command: "status", Description: "查看运行状态与 MCP 概览"},
+		tgbotapi.BotCommand{Command: "upgrade", Description: "检查并升级 grok-bot 或 Grok CLI"},
 		tgbotapi.BotCommand{Command: "stop", Description: "停止当前正在执行的任务"},
 		tgbotapi.BotCommand{Command: "new", Description: "归档当前会话并开启新话题"},
 		tgbotapi.BotCommand{Command: "sessions", Description: "查看或切换历史会话"},

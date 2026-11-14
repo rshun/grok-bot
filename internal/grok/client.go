@@ -734,9 +734,12 @@ var botEnvKeys = map[string]bool{
 	"DISCORD_BOT_TOKEN":        true,
 	"ALLOWED_USER_IDS":         true,
 	"DISCORD_ALLOWED_USER_IDS": true,
+	"ADMIN_USER_IDS":           true,
+	"DISCORD_ADMIN_USER_IDS":   true,
 	"DATA_DIR":                 true,
 	"DEFAULT_MODEL":            true,
 	"WEB_SEARCH":               true,
+	"LINK_PREFETCH":            true,
 	"ALLOW_SHELL":              true,
 	"SHOW_PROGRESS":            true,
 	"GROK_MAX_TURNS":           true,
@@ -745,6 +748,8 @@ var botEnvKeys = map[string]bool{
 	"QUEUE_LIMIT":              true,
 	"TASK_LIMIT":               true,
 	"TASK_MIN_INTERVAL":        true,
+	"SCRIPT_DIRS":              true,
+	"SCRIPT_TIMEOUT":           true,
 }
 
 func envWithoutUpdate() []string {
@@ -758,6 +763,19 @@ func envWithoutUpdate() []string {
 		out = append(out, item)
 	}
 	return append(out, key+"=1")
+}
+
+func envForCLIUpdate() []string {
+	const disableKey = "GROK_DISABLE_AUTOUPDATER"
+	out := make([]string, 0, len(os.Environ())+2)
+	for _, item := range os.Environ() {
+		name, _, _ := strings.Cut(item, "=")
+		if name == disableKey || name == "CI" || name == "NONINTERACTIVE" || botEnvKeys[name] {
+			continue
+		}
+		out = append(out, item)
+	}
+	return append(out, "CI=1", "NONINTERACTIVE=1")
 }
 
 func firstLine(text string) string {

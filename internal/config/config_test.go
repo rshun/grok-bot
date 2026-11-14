@@ -182,3 +182,38 @@ func TestLoadUserProfile(t *testing.T) {
 		t.Fatalf("EXISTING_BOT_VAR overwritten: %q", got)
 	}
 }
+
+func TestLoadAdminUserIDs(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "tg-token")
+	t.Setenv("ALLOWED_USER_IDS", "10,20")
+	t.Setenv("DISCORD_BOT_TOKEN", "dc-token")
+	t.Setenv("DISCORD_ALLOWED_USER_IDS", "100,200")
+	t.Setenv("ADMIN_USER_IDS", "")
+	t.Setenv("DISCORD_ADMIN_USER_IDS", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TelegramAdmins != nil || cfg.DiscordAdmins != nil {
+		t.Fatalf("expected nil admins when unset: %#v %#v", cfg.TelegramAdmins, cfg.DiscordAdmins)
+	}
+
+	t.Setenv("ADMIN_USER_IDS", "10")
+	t.Setenv("DISCORD_ADMIN_USER_IDS", "200")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfg.TelegramAdmins["10"]; !ok || len(cfg.TelegramAdmins) != 1 {
+		t.Fatalf("TelegramAdmins: %#v", cfg.TelegramAdmins)
+	}
+	if _, ok := cfg.DiscordAdmins["200"]; !ok || len(cfg.DiscordAdmins) != 1 {
+		t.Fatalf("DiscordAdmins: %#v", cfg.DiscordAdmins)
+	}
+
+	t.Setenv("ADMIN_USER_IDS", "not-a-number")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for invalid ADMIN_USER_IDS")
+	}
+}
