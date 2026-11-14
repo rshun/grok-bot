@@ -28,7 +28,7 @@ A self-hosted **Telegram & Discord private AI assistant** powered by your local 
 
 - **零 API 账单**：直接复用服务器本机 `grok login` 订阅态，无需配置付费 LLM、语音或图床 API Key。
 - **双平台独立对话 + 一键跨端接力**：普通对话上下文按平台各自独立（在 Telegram 提问就在 Telegram 回复，在 Discord 提问就在 Discord 回复），同时支持通过 `/sessions` 或内联按钮**在 TG 与 Discord 之间一键接力同一段上下文**。
-- **双端自动共享记忆与任务**：长期记忆（`/memory`）与定时任务（`/task`）在 Telegram 与 Discord 之间实时同步共享；定时任务触发时自动双端同时推送。
+- **双端自动共享记忆与任务**：长期记忆（`/memory`）与定时任务（`/task`）在 Telegram 与 Discord 之间实时同步共享；定时任务默认双端同时推送，也支持指定仅推单一平台（仅 TG 或仅 Discord），且在条件巡检正常无产出时自动静默不打扰。
 - **多模态开箱即用**：支持多图识别（含 Telegram 相册合并）、Grok 4.7 原生 AI 生图/改图、联网安全找图、单词/多语种标准 `.mp3` 发音条、外链防 SSRF 正文预抓取（GitHub / X / 网页）、服务器文件安全下发与表情回应。
 - **系统级定时调度 + 零额度脚本任务**：自动对接 Linux `crontab`、macOS `launchd`、Windows 任务计划程序；支持将固定业务脚本（`.py` / `.sh` / 可执行程序）绑定为 `/task script`，到点直接运行脚本，不调 Grok、不耗额度，失败自动双端告警。
 - **本机主动推送 CLI**：提供 `grok-bot send` 子命令，服务器上的监控、量化或业务脚本可直接复用机器人配置向私聊推送文字与报表文件。
@@ -148,7 +148,7 @@ sudo systemctl enable --now grok-tg-bot
 | `/model [模型名]` | 查看当前模型与 CLI 可用模型列表（附点选切换按钮），切换模型保留当前上下文 |
 | `/usage` | 查询当前订阅周期剩余额度 |
 | `/memory` | 查看跨平台共享长期记忆；支持 `add <内容>`、`del <编号>`、`clear`，或直接说「长期记忆：…」 |
-| `/task` | 管理定时任务与脚本任务（支持一句话自然语言、`cron`、`script`、`bind`、`unbind`、`list`、`run`、`pause`、`resume`、`skip`、`del`） |
+| `/task` | 管理定时任务与脚本任务（支持一句话自然语言、`cron [-p tg\|dc]`、`script [-p tg\|dc]`、`platform <编号> <tg\|dc\|all>`、`bind`、`unbind`、`list`、`run`、`pause`、`resume`、`skip`、`del`） |
 | `/mcp` | 管理 MCP 服务：`/mcp` 列表、`doctor [名称]` 连通诊断、`add <名称> <URL 或 -- 命令...>`、`enable\|disable <名称>`、`del <名称>` |
 | `/dir` | 查看可写目录白名单；`/dir add rw /绝对路径` 授权写入；`/dir del /绝对路径` 收回权限（或直接说「允许写入 /srv/out」） |
 | `/shell` | 查看或切换命令执行权限（`/shell on` / `/shell off`，或直接说「开启命令执行」「关闭命令执行」） |
@@ -190,7 +190,9 @@ sudo systemctl enable --now grok-tg-bot
   - **Linux / Unix**：托管写入当前用户的 `crontab`（`# BEGIN GROK-BOT TASKS` ... `# END GROK-BOT TASKS`）。
   - **macOS**：写入 `~/Library/LaunchAgents/com.grokbot.task.<编号>.plist` 并通过 `launchctl` 加载。
   - **Windows**：注册至系统任务计划程序（`\GrokBot\Task_<编号>`）。
-- 每次触发均使用独立会话，不污染日常聊天上下文，结果以 `⏰ 定时任务 #编号` 双端推送到 Telegram 与 Discord。
+- 每次触发均使用独立会话，不污染日常聊天上下文：
+  - **灵活推送范围**：未指定平台时默认双端推送（Telegram + Discord）；创建时可说「只推 TG / 只推 Discord」（或使用 `/task cron -p tg ...`、`/task script -p dc ...`），也可随时用 `/task platform <编号> <tg|dc|all>` 切换已有任务的推送平台。
+  - **无产出自动静默**：当任务属于条件检查（如非交易日、无新数据或指标正常无需汇报）且业务正常无结果产出（返回 `[[NO_REPLY]]`）时，自动静默跳过推送；有实际内容或执行报错时正常通知。
 
 ##### 本机脚本任务（`/task script` / `/task bind`）
 对于逻辑固定或耗时的自动化任务（如定时下单、数据采集、日报生成），可直接绑定本机脚本执行，**不调用 Grok、不占会话、零额度消耗**：
@@ -428,7 +430,7 @@ All major commands include **interactive inline buttons** on both Telegram and D
 | `/model [name]` | View current and available models (with one-click selection buttons); switching models preserves chat context |
 | `/usage` | Check remaining Grok subscription quota for the current billing period |
 | `/memory` | View shared long-term memories; supports `add <text>`, `del <id>`, `clear`, or natural language |
-| `/task` | Manage scheduled & script tasks (`<natural language>`, `cron`, `script`, `bind`, `unbind`, `list`, `run`, `pause`, `resume`, `skip`, `del`) |
+| `/task` | Manage scheduled & script tasks (`<natural language>`, `cron [-p tg\|dc]`, `script [-p tg\|dc]`, `platform <id> <tg\|dc\|all>`, `bind`, `unbind`, `list`, `run`, `pause`, `resume`, `skip`, `del`) |
 | `/mcp` | Manage MCP servers: `/mcp` list, `doctor [name]`, `add <name> <URL or -- cmd...>`, `enable\|disable <name>`, `del <name>` |
 | `/dir` | View writable directories; `/dir add rw /abs/path` to grant write access; `/dir del /abs/path` to revoke |
 | `/shell` | View or toggle server command execution (`/shell on` / `/shell off`) |
@@ -469,7 +471,9 @@ Create tasks in natural language (e.g., `/task Summarize top tech news every wee
   - **Linux / Unix**: Managed block inside the service user's `crontab` (`# BEGIN GROK-BOT TASKS` ... `# END GROK-BOT TASKS`).
   - **macOS**: `~/Library/LaunchAgents/com.grokbot.task.<id>.plist` via `launchctl`.
   - **Windows**: Windows Task Scheduler under `\GrokBot\Task_<id>`.
-- Runs in an isolated session without polluting your main chat history and delivers `⏰` results to both Telegram and Discord.
+- Runs in an isolated session without polluting your main chat history:
+  - **Flexible Platform Targeting**: Delivers to all configured platforms (Telegram + Discord) by default, or restricts a task to a single platform via natural language, `-p tg|dc` on `cron`/`script`, or `/task platform <id> <tg|dc|all>`.
+  - **Quiet No-Op Runs**: Condition-check tasks that complete normally with nothing to report (`[[NO_REPLY]]`) silently skip notifications, pushing messages only when actionable output or an execution error occurs.
 
 ##### Local Script Tasks (`/task script` / `/task bind`)
 Offload deterministic or long-running jobs (e.g., automated ordering, scrapers, ETL reports) to local scripts while managing their schedule from chat — **zero Grok invocations and zero quota usage**:

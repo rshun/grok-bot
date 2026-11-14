@@ -38,6 +38,8 @@ type Task struct {
 	Paused   bool
 	// Script is the absolute path of a local script run instead of a Grok prompt; empty for prompt tasks.
 	Script string
+	// TargetPlatform restricts delivery to a single platform ("telegram" or "discord"); empty delivers to all configured platforms.
+	TargetPlatform string
 }
 
 // Memory is one persistent user instruction or fact scoped to a chat.
@@ -178,6 +180,16 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	hasTaskTargetPlatform, err := s.hasColumn("tasks", "target_platform")
+	if err != nil {
+		return err
+	}
+	if !hasTaskTargetPlatform {
+		// Existing tasks continue delivering to all configured platforms (empty target_platform).
+		if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN target_platform TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -313,10 +325,10 @@ func (s *Store) DeleteDir(ctx context.Context, path string) (bool, error) {
 // AddTask stores a scheduled task and returns its id.
 func (s *Store) AddTask(ctx context.Context, t Task) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO tasks (platform, chat_id, user_id, spec, prompt, summary, next_run, created_at, script)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO tasks (platform, chat_id, user_id, spec, prompt, summary, next_run, created_at, script, target_platform)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, t.Platform, t.ChatID, t.UserID, t.Spec, t.Prompt, t.Summary,
-		t.NextRun.UTC().Format(runLayout), time.Now().UTC().Format(time.RFC3339Nano), t.Script)
+		t.NextRun.UTC().Format(runLayout), time.Now().UTC().Format(time.RFC3339Nano), t.Script, t.TargetPlatform)
 	if err != nil {
 		return 0, fmt.Errorf("save task: %w", err)
 	}
@@ -394,6 +406,16 @@ func (s *Store) UpdateTask(ctx context.Context, id int64, spec, prompt, summary 
 // SetTaskScript binds (or with an empty path, unbinds) a local script to an existing task.
 func (s *Store) SetTaskScript(ctx context.Context, id int64, script string) (bool, error) {
 	res, err := s.db.ExecContext(ctx, `UPDATE tasks SET script = ? WHERE id = ?`, script, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// SetTaskTargetPlatform sets (or with an empty string, clears to all platforms) the delivery platform of an existing task.
+func (s *Store) SetTaskTargetPlatform(ctx context.Context, id int64, targetPlatform string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE tasks SET target_platform = ? WHERE id = ?`, targetPlatform, id)
 	if err != nil {
 		return false, err
 	}
@@ -803,7 +825,7 @@ func (s *Store) KnownChats(ctx context.Context, platform string) ([]string, erro
 
 func (s *Store) queryTasks(ctx context.Context, where string, args ...any) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, platform, chat_id, user_id, spec, prompt, summary, next_run, paused, script FROM tasks `+where, args...)
+		`SELECT id, platform, chat_id, user_id, spec, prompt, summary, next_run, paused, script, target_platform FROM tasks `+where, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -813,7 +835,7 @@ func (s *Store) queryTasks(ctx context.Context, where string, args ...any) ([]Ta
 		var t Task
 		var next string
 		var paused int
-		if err := rows.Scan(&t.ID, &t.Platform, &t.ChatID, &t.UserID, &t.Spec, &t.Prompt, &t.Summary, &next, &paused, &t.Script); err != nil {
+		if err := rows.Scan(&t.ID, &t.Platform, &t.ChatID, &t.UserID, &t.Spec, &t.Prompt, &t.Summary, &next, &paused, &t.Script, &t.TargetPlatform); err != nil {
 			return nil, err
 		}
 		t.NextRun, err = time.Parse(runLayout, next)

@@ -331,8 +331,12 @@ func runPushCommand(ctx context.Context, cfg config.Config, db *store.Store, pol
 }
 
 func targetPlatforms(ctx context.Context, cfg config.Config, db *store.Store, req pushRequest) ([]string, error) {
-	if req.Platform != "" {
-		switch req.Platform {
+	plat := req.Platform
+	if plat == "" && req.ChatID == "" {
+		plat = normalizePlatform(os.Getenv("GROK_BOT_TASK_PLATFORM"))
+	}
+	if plat != "" {
+		switch plat {
 		case platform.Telegram:
 			if cfg.TelegramToken == "" {
 				return nil, errors.New("未配置 TELEGRAM_BOT_TOKEN")
@@ -344,7 +348,7 @@ func targetPlatforms(ctx context.Context, cfg config.Config, db *store.Store, re
 			}
 			return []string{platform.Discord}, nil
 		default:
-			return nil, fmt.Errorf("不支持的平台 %q", req.Platform)
+			return nil, fmt.Errorf("不支持的平台 %q", plat)
 		}
 	}
 

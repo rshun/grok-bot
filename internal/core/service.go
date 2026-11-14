@@ -289,8 +289,12 @@ func (s *Service) dispatch(it item) {
 		baseCtx = ctx
 	}
 	if it.task != nil {
-		text, files := s.runTask(ctx, it.in, it.out, *it.task)
+		text, files, silent := s.runTask(ctx, it.in, it.out, *it.task)
 		if stoppedByUser() {
+			return
+		}
+		if silent {
+			slog.Info("scheduled task completed with no output; notification suppressed", "task", it.task.ID)
 			return
 		}
 		s.deliverTask(baseCtx, *it.task, it.in.Platform, it.in.ChatID, it.out, text, files)
@@ -776,9 +780,11 @@ func helpText(version string) string {
 /memory
     查看或管理长期记忆（TG / Discord 自动同步，执行 /reset 后仍会保留）
 /task 一句话
-    创建或管理定时任务（TG / Discord 共享并同时推送，支持每天/每周/每月/最后一天/工作日/5段Cron）
+    创建或管理定时任务（默认全平台推送，可指定只推 TG 或 Discord；支持每天/每周/每月/最后一天/工作日/5段Cron）
 /task list
     查看定时任务（附一键试跑/暂停/恢复/删除按钮）
+/task platform 编号 tg|dc|all
+    修改指定定时任务的推送平台（仅TG / 仅Discord / 全平台）
 /task run 编号
     立即试跑一次定时任务（不影响正常排期）
 /task pause 编号 / /task resume 编号
@@ -854,7 +860,11 @@ func (s *Service) withChatTasksContext(ctx context.Context, in platform.Inbound,
 		if t.Paused {
 			status = "已暂停"
 		}
-		fmt.Fprintf(&b, "#%d %s（指令：%s；状态：%s）\n", t.ID, t.Summary, t.Prompt, status)
+		platInfo := ""
+		if t.TargetPlatform != "" {
+			platInfo = "；推送：仅 " + fullPlatformName(t.TargetPlatform)
+		}
+		fmt.Fprintf(&b, "#%d %s（指令：%s；状态：%s%s）\n", t.ID, t.Summary, t.Prompt, status, platInfo)
 	}
 	b.WriteString("[列表结束]\n\n")
 	b.WriteString(prompt)

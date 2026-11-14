@@ -136,6 +136,18 @@ func TestTargetPlatformsDefaultDualPush(t *testing.T) {
 	if _, err := targetPlatforms(ctx, dualCfg, nil, pushRequest{ChatID: "99999", Text: "hello"}); err == nil {
 		t.Fatal("expected error for unknown --chat without -p on dual platform")
 	}
+
+	// Script tasks bound to a single platform pass GROK_BOT_TASK_PLATFORM, narrowing default `grok-bot send`.
+	t.Setenv("GROK_BOT_TASK_PLATFORM", "discord")
+	plats, err = targetPlatforms(ctx, dualCfg, nil, pushRequest{Text: "hello"})
+	if err != nil || !reflect.DeepEqual(plats, []string{platform.Discord}) {
+		t.Fatalf("GROK_BOT_TASK_PLATFORM=discord got %v, err=%v", plats, err)
+	}
+	// Explicit -p still overrides GROK_BOT_TASK_PLATFORM.
+	plats, err = targetPlatforms(ctx, dualCfg, nil, pushRequest{Platform: platform.Telegram, Text: "hello"})
+	if err != nil || !reflect.DeepEqual(plats, []string{platform.Telegram}) {
+		t.Fatalf("explicit -p override got %v, err=%v", plats, err)
+	}
 }
 
 func TestEnvCandidateAndResolveDataDir(t *testing.T) {
