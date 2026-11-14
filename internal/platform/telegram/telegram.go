@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -18,9 +19,13 @@ type Bot struct {
 }
 
 func New(token string) (*Bot, error) {
-	api, err := tgbotapi.NewBotAPI(token)
+	client := &safeHTTPClient{
+		base:  &http.Client{},
+		token: token,
+	}
+	api, err := tgbotapi.NewBotAPIWithClient(token, tgbotapi.APIEndpoint, client)
 	if err != nil {
-		return nil, err
+		return nil, sanitizeErr(err, token)
 	}
 	api.Debug = false
 	return &Bot{api: api}, nil
@@ -33,7 +38,7 @@ func (b *Bot) Username() string {
 // Run polls until ctx is cancelled. handler should return quickly.
 func (b *Bot) Run(ctx context.Context, handler func(context.Context, platform.Inbound, platform.Replier)) error {
 	if err := b.registerCommands(); err != nil {
-		slog.Warn("telegram register commands failed", "err", err)
+		slog.Warn("telegram register commands failed", "err", sanitizeErr(err, b.api.Token))
 	}
 	updates := tgbotapi.NewUpdate(0)
 	updates.Timeout = 30

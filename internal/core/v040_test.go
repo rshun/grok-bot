@@ -118,7 +118,7 @@ func (f *fakeMCPEngine) Version(context.Context) (string, error) {
 }
 
 func (f *fakeMCPEngine) MCPList(context.Context) (string, error) {
-	return "Theseus-mcp (connected)\nrag-mcp (connected)", nil
+	return "  Theseus-mcp: https://internal.example.com/mcp\n  rag-mcp: https://rag.example.com/mcp (disabled)\n", nil
 }
 
 func (f *fakeMCPEngine) MCPDoctor(_ context.Context, name string) (string, error) {
@@ -188,12 +188,19 @@ func TestNewSessionsSwitchStatusAndMCPCommands(t *testing.T) {
 		t.Fatalf("expected active session to return to %q, got %q", chat1.SessionID, switched.SessionID)
 	}
 
-	// 5. /status shows CLI version, sessions, and MCP summary.
+	// 5. /status and /mcp show MCP server names without exposing URLs.
 	statusReply := sendSync(t, svc, platform.Inbound{Text: "/status"})
-	for _, want := range []string{"v0.4.0", "grok 1.0.70", "Theseus-mcp (connected)"} {
+	for _, want := range []string{"v0.4.0", "grok 1.0.70", "Theseus-mcp", "rag-mcp (disabled)"} {
 		if !strings.Contains(statusReply, want) {
 			t.Fatalf("missing %q in /status:\n%s", want, statusReply)
 		}
+	}
+	if strings.Contains(statusReply, "internal.example.com") || strings.Contains(statusReply, "rag.example.com") {
+		t.Fatalf("/status leaked MCP URL:\n%s", statusReply)
+	}
+	mcpListReply := sendSync(t, svc, platform.Inbound{Text: "/mcp"})
+	if !strings.Contains(mcpListReply, "Theseus-mcp\nrag-mcp (disabled)") || strings.Contains(mcpListReply, "https://") {
+		t.Fatalf("/mcp list should show names only without URLs:\n%s", mcpListReply)
 	}
 
 	// 6. /mcp CRUD + doctor

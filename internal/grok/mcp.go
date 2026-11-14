@@ -3,6 +3,7 @@ package grok
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,7 +16,10 @@ import (
 var (
 	reBearerSecret = regexp.MustCompile(`(?i)\b(Bearer\s+)([^\s"',;]+)`)
 	reTokenPrefix  = regexp.MustCompile(`\b(sk|xai|ghp|gho|github_pat|glpat|xoxb|xoxp)-[A-Za-z0-9_\-]{6,}`)
+	reBotURLToken  = regexp.MustCompile(`\b(bot\d+:)[A-Za-z0-9_\-]{10,}`)
 	reSecretKV     = regexp.MustCompile(`(?i)\b([A-Za-z0-9_]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|authorization|cookie|credential)[A-Za-z0-9_]*)\s*([=:])\s*([^\s"',;\n]+)`)
+	reParenURL     = regexp.MustCompile(`(?i)\(\s*(?:https?:\s*)?https?://[^)\s]+\s*\)`)
+	reHTTPURL      = regexp.MustCompile(`https?://\S+`)
 )
 
 // RedactSensitive masks tokens, API keys, passwords, and auth headers in CLI outputs.
@@ -25,6 +29,7 @@ func RedactSensitive(text string) string {
 	}
 	out := reBearerSecret.ReplaceAllString(text, "${1}****")
 	out = reTokenPrefix.ReplaceAllString(out, "${1}-****")
+	out = reBotURLToken.ReplaceAllString(out, "${1}****")
 	out = reSecretKV.ReplaceAllStringFunc(out, func(m string) string {
 		sub := reSecretKV.FindStringSubmatch(m)
 		if len(sub) != 4 {
@@ -47,13 +52,92 @@ func (c *Client) Version(ctx context.Context) (string, error) {
 	return firstLine(out), nil
 }
 
-// MCPList returns configured MCP servers (with sensitive fields redacted).
+// MCPList returns configured MCP server names without exposing URLs or launch arguments.
 func (c *Client) MCPList(ctx context.Context) (string, error) {
+	if out, err := c.runAdmin(ctx, 20*time.Second, "mcp", "list", "--json"); err == nil {
+		return FormatMCPList(out), nil
+	}
 	out, err := c.runAdmin(ctx, 20*time.Second, "mcp", "list")
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(RedactSensitive(out)), nil
+	return FormatMCPList(out), nil
+}
+
+type mcpListEntry struct {
+	Name    string `json:"name"`
+	Enabled *bool  `json:"enabled"`
+}
+
+// FormatMCPList extracts MCP server names from `grok mcp list` JSON or text output,
+// stripping all URLs and command lines.
+func FormatMCPList(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasPrefix(trimmed, "[") {
+		var entries []mcpListEntry
+		if err := json.Unmarshal([]byte(trimmed), &entries); err == nil {
+			return formatMCPEntries(entries)
+		}
+	}
+	if strings.HasPrefix(trimmed, "{") {
+		var wrapped struct {
+			Servers []mcpListEntry `json:"servers"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &wrapped); err == nil && wrapped.Servers != nil {
+			return formatMCPEntries(wrapped.Servers)
+		}
+	}
+	if strings.HasPrefix(strings.ToLower(trimmed), "no mcp servers configured") {
+		return ""
+	}
+
+	var lines []string
+	for _, line := range strings.Split(trimmed, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if idx := strings.IndexByte(line, ':'); idx > 0 && !strings.ContainsAny(line[:idx], " \t(") {
+			name := strings.TrimSpace(line[:idx])
+			if name == "" || strings.EqualFold(name, "grokbot") {
+				continue
+			}
+			rest := strings.TrimSpace(line[idx+1:])
+			if strings.HasSuffix(strings.ToLower(rest), "(disabled)") {
+				lines = append(lines, name+" (disabled)")
+			} else {
+				lines = append(lines, name)
+			}
+			continue
+		}
+		cleaned := reParenURL.ReplaceAllString(line, "")
+		cleaned = reHTTPURL.ReplaceAllString(cleaned, "")
+		cleaned = strings.Join(strings.Fields(cleaned), " ")
+		if cleaned == "" || strings.EqualFold(cleaned, "grokbot") {
+			continue
+		}
+		lines = append(lines, cleaned)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatMCPEntries(entries []mcpListEntry) string {
+	var lines []string
+	for _, e := range entries {
+		name := strings.TrimSpace(e.Name)
+		if name == "" || strings.EqualFold(name, "grokbot") {
+			continue
+		}
+		if e.Enabled != nil && !*e.Enabled {
+			lines = append(lines, name+" (disabled)")
+		} else {
+			lines = append(lines, name)
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // MCPDoctor diagnoses MCP server configuration and handshake connectivity.
