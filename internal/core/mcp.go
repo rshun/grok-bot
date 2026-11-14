@@ -98,10 +98,12 @@ func (s *Service) statusCommand(ctx context.Context, in platform.Inbound) (strin
 	}
 
 	if mcpEng, ok := s.Engine.(MCPEngine); ok {
-		if mcpOut, mcpErr := mcpEng.MCPList(ctx); mcpErr == nil && mcpOut != "" {
-			b.WriteString("\nMCP 服务列表（可用 `/mcp doctor` 检查握手连通性）：\n```\n")
-			b.WriteString(mcpOut)
-			b.WriteString("\n```")
+		if mcpOut, mcpErr := mcpEng.MCPList(ctx); mcpErr == nil {
+			if formatted := grok.FormatMCPList(mcpOut); formatted != "" {
+				b.WriteString("\nMCP 服务列表（可用 `/mcp doctor` 检查握手连通性）：\n```\n")
+				b.WriteString(formatted)
+				b.WriteString("\n```")
+			}
 		}
 	}
 	return strings.TrimSpace(b.String()), statusButtons(), nil
@@ -128,6 +130,7 @@ func (s *Service) mcpCommand(ctx context.Context, arg string) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		out = grok.FormatMCPList(out)
 		if out == "" {
 			return "当前没有配置任何 MCP 服务。\n\n" + mcpUsage, nil
 		}
