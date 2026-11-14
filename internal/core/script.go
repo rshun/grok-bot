@@ -129,20 +129,24 @@ func scriptCommand(ctx context.Context, path string) (*exec.Cmd, error) {
 
 // scriptEnv is the process environment without bot secrets, plus task context for the script.
 func (s *Service) scriptEnv(t store.Task) []string {
-	out := make([]string, 0, len(os.Environ())+len(s.ScriptEnv)+4)
+	out := make([]string, 0, len(os.Environ())+len(s.ScriptEnv)+5)
 	for _, item := range os.Environ() {
 		name, _, _ := strings.Cut(item, "=")
-		if scriptSecretEnv[name] {
+		if scriptSecretEnv[name] || name == "GROK_BOT_TASK_PLATFORM" {
 			continue
 		}
 		out = append(out, item)
 	}
 	out = append(out, s.ScriptEnv...)
-	return append(out,
+	out = append(out,
 		fmt.Sprintf("GROK_BOT_TASK_ID=%d", t.ID),
 		"PYTHONIOENCODING=utf-8",
 		"PYTHONUNBUFFERED=1",
 	)
+	if t.TargetPlatform != "" {
+		out = append(out, "GROK_BOT_TASK_PLATFORM="+t.TargetPlatform)
+	}
+	return out
 }
 
 // limitedBuffer keeps at most max bytes, dropping the oldest output first.
@@ -268,12 +272,16 @@ func (s *Service) appendScriptLog(t store.Task, script string, started time.Time
 }
 
 // startScriptTrial runs a script task in the background for /task run so long scripts never
-// block the chat lane; the result is pushed to every configured platform when it finishes.
+// block the chat lane; the result is pushed to the task's target platform(s) when it finishes.
 func (s *Service) startScriptTrial(t store.Task) string {
 	go func() {
 		ctx := context.Background()
 		text, _ := s.runScriptTask(ctx, t)
 		s.deliverTask(ctx, t, "", "", nil, text, nil)
 	}()
-	return fmt.Sprintf("▶️ 已在后台启动脚本任务 #%d：%s。\n脚本：%s\n执行完成后会推送结果（不占用当前会话）。", t.ID, t.Summary, t.Script)
+	targetNote := "执行完成后会推送结果（不占用当前会话）。"
+	if t.TargetPlatform != "" {
+		targetNote = fmt.Sprintf("执行完成后将仅推送至 %s（不占用当前会话）。", fullPlatformName(t.TargetPlatform))
+	}
+	return fmt.Sprintf("▶️ 已在后台启动脚本任务 #%d：%s。\n脚本：%s\n%s", t.ID, t.Summary, t.Script, targetNote)
 }

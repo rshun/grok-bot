@@ -36,6 +36,8 @@ const promptFilesAndShell = " You may list any directory and read any file the s
 
 const promptReact = " You can react to the user's message with one emoji using the MCP tool grokbot__react. If a reaction alone is enough, call it and reply with exactly [[NO_REPLY]]."
 
+const promptScheduledTask = " You are executing an automated scheduled task. If the task checks a condition, schedule, file, or threshold (for example, checking whether today is a trading day or whether new records/anomalies exist) and everything is normal with no output or result needed, reply with exactly [[NO_REPLY]] and do not send any files or images. When the task produces content/results or encounters an error/anomaly to report, reply normally."
+
 const promptSendFile = " You can send a file to the user with the MCP tool grokbot__send_file; path must be absolute. When you send a file, also reply with one short line of text."
 
 const promptPronounce = " When the user asks how a word, phrase, or sentence is pronounced or read aloud, include clear phonetic notation (such as IPA) in your reply and call the MCP tool grokbot__pronounce (default lang \"en-US\" for English, \"en-GB\" when British pronunciation is requested, or the matching language code) so the user receives standard formal audio."
@@ -151,6 +153,8 @@ type ReplyOptions struct {
 	Images []Image
 	// Memories are persistent user instructions injected into the system prompt on every turn.
 	Memories []string
+	// ScheduledTask tells Grok to answer [[NO_REPLY]] when a scheduled condition check succeeds with no output to report.
+	ScheduledTask bool
 	// MaxTurns overrides Client.MaxTurns when non-zero (< 0 omits --max-turns).
 	MaxTurns int
 }
@@ -365,6 +369,9 @@ func systemPromptFor(opts ReplyOptions) string {
 		return promptSchema
 	}
 	prompt := promptBase
+	if opts.ScheduledTask {
+		prompt += promptScheduledTask
+	}
 	if opts.WebSearch {
 		prompt += promptWeb
 	}

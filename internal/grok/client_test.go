@@ -146,6 +146,13 @@ func TestReplyArgsWebSearch(t *testing.T) {
 			t.Fatalf("missing %q in media system prompt: %s", want, mediaPrompt)
 		}
 	}
+
+	sched := base
+	sched.ScheduledTask = true
+	schedPrompt := argValue(t, replyArgs("/ws", sched), "--system-prompt-override")
+	if !strings.Contains(schedPrompt, "[[NO_REPLY]]") || !strings.Contains(schedPrompt, "automated scheduled task") {
+		t.Fatalf("missing scheduled task no-reply prompt: %s", schedPrompt)
+	}
 }
 
 var wantFileTools = []string{"read_file", "list_dir", "grep", "search_replace", "write"}

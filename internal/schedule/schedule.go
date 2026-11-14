@@ -39,22 +39,25 @@ type Spec struct {
 // Parsed is Grok's structured answer to a scheduling request.
 type Parsed struct {
 	Spec
-	// Action is create (default), skip, pause, resume or delete.
+	// Action is create (default), skip, pause, resume, delete, run, update or none.
 	Action  string `json:"action,omitempty"`
 	TaskID  int64  `json:"task_id,omitempty"`
 	Prompt  string `json:"prompt"`
 	Summary string `json:"summary"`
-	Error   string `json:"error,omitempty"`
+	// TargetPlatform is "telegram", "discord", "all" (reset to all platforms on update), or "" (unspecified / all platforms).
+	TargetPlatform string `json:"target_platform,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 // ExistingTask describes a task already scheduled in the chat so Grok can
 // match natural-language skip, pause, resume or delete requests without an ID.
 type ExistingTask struct {
-	ID      int64
-	Summary string
-	Prompt  string
-	NextRun time.Time
-	Paused  bool
+	ID             int64
+	Summary        string
+	Prompt         string
+	NextRun        time.Time
+	Paused         bool
+	TargetPlatform string
 }
 
 // Schema is passed to grok with --json-schema.
@@ -71,6 +74,7 @@ const Schema = `{"type":"object","properties":{` +
 	`"cron":{"type":"string","description":"cron: standard 5-field cron expression (min hour dom month dow)"},` +
 	`"prompt":{"type":"string"},` +
 	`"summary":{"type":"string"},` +
+	`"target_platform":{"type":"string","enum":["telegram","discord","all",""],"description":"optional delivery platform: telegram, discord, or all (leave empty when not specified so all platforms receive it)"},` +
 	`"error":{"type":"string"}}}`
 
 // Prompt asks Grok to read text as a schedule or task management request relative to now.
@@ -84,7 +88,11 @@ func Prompt(text string, now time.Time, loc *time.Location, tasks ...ExistingTas
 			if t.Paused {
 				status = "paused"
 			}
-			fmt.Fprintf(&taskBlock, "- #%d: %s (prompt: %s; %s)\n", t.ID, t.Summary, t.Prompt, status)
+			plat := t.TargetPlatform
+			if plat == "" {
+				plat = "all"
+			}
+			fmt.Fprintf(&taskBlock, "- #%d: %s (prompt: %s; platform: %s; %s)\n", t.ID, t.Summary, t.Prompt, plat, status)
 		}
 	}
 	return fmt.Sprintf(`Current local time: %s %s (%s, %s).%s
@@ -97,11 +105,12 @@ Turn the scheduling request below into JSON.
   - kind "interval": set "every_minutes".
   - kind "dates": when the request says to run according to dates in a file, set "date_file" to the file path and "time" to HH:MM (default "09:00" if no time of day is specified).
   - kind "cron": when the user provides a 5-field cron expression or a complex recurring schedule (e.g. "每小时整点", "工作日9点到15点每小时"), set "cron" to a standard 5-field cron expression "min hour dom month dow".
-  - "prompt": what Grok should do each time the task runs, as an instruction in the user's language, without the schedule.
+  - "prompt": what Grok should do each time the task runs, as an instruction in the user's language, without the schedule or delivery-platform directive.
   - "summary": one short Chinese line such as "每天 09:00：总结科技新闻".
+  - "target_platform": optional. Leave empty unless the user explicitly asks to push ONLY to Telegram ("telegram", e.g. "只推TG", "仅发Telegram") or ONLY to Discord ("discord", e.g. "只推Discord", "仅发DC").
 - To manage an existing task in natural language:
   - "action" = "run": immediately run/test an existing task once right now without changing its schedule (e.g. "现在试跑一下定时任务", "请试运行一下任务2", "运行一下#2", "马上执行一次任务1", "跑一下抽单词那个任务").
-  - "action" = "update": change an existing task's schedule/time (e.g. "把定时任务改到每天 10:00", "把任务2改成每个工作日 09:30"); fill the new schedule fields ("kind", "at"/"time"/"weekdays"/"every_minutes"/"date_file") and set "summary" to reflect the new schedule ("prompt" may be omitted if unchanged).
+  - "action" = "update": change an existing task's schedule/time and/or delivery platform (e.g. "把定时任务改到每天 10:30", "把任务2改成每个工作日 09:30", "把任务1改成只推送TG", "把#2改为全平台推送"); when changing schedule, fill the new schedule fields ("kind", "at"/"time"/"weekdays"/"month_days"/"every_minutes"/"date_file"/"cron") and set "summary" to reflect the new schedule ("prompt" may be omitted if unchanged); when changing delivery platform, set "target_platform" to "telegram", "discord", or "all" (leave schedule fields empty if the time is unchanged).
   - "action" = "skip": cancel/skip only the next run (e.g. "取消明天的定时任务", "明天不用执行了", "跳过下次"), keeping future runs.
   - "action" = "pause": pause an active task until resumed (e.g. "暂停定时任务", "先停一下任务2").
   - "action" = "resume": resume a paused task (e.g. "恢复定时任务", "恢复任务2").
@@ -132,6 +141,15 @@ func Decode(structured json.RawMessage, text string) (Parsed, error) {
 	}
 	if p.Kind == "dates" && strings.TrimSpace(p.Time) == "" {
 		p.Time = "09:00"
+	}
+	p.TargetPlatform = strings.ToLower(strings.TrimSpace(p.TargetPlatform))
+	switch p.TargetPlatform {
+	case "tg":
+		p.TargetPlatform = "telegram"
+	case "dc":
+		p.TargetPlatform = "discord"
+	case "both", "全平台", "全部", "所有":
+		p.TargetPlatform = "all"
 	}
 	return p, nil
 }

@@ -598,3 +598,165 @@ func TestInitSchedulerAndNativeSyncStatus(t *testing.T) {
 		t.Fatalf("expected sync failure in /status, got:\n%s", statusWarn)
 	}
 }
+
+func TestTaskTargetPlatformSingleVsAll(t *testing.T) {
+	ctx := context.Background()
+	onlyTG := `{"action":"create","kind":"daily","time":"09:00","prompt":"看新闻","summary":"每天 09:00：看新闻","target_platform":"telegram"}`
+	svc, _, tgSent := taskService(t, onlyTG)
+	dcRec := &recorder{}
+	svc.AllowedUsers[platform.Discord] = map[string]struct{}{"dc_u1": {}}
+	svc.Senders[platform.Discord] = &fakeDiscordSender{rec: dcRec}
+
+	// 1. Create a Telegram-only task.
+	cmdRec := &recorder{}
+	say(svc, cmdRec, "/task 每天九点看新闻 只推TG")
+	gotCmd := cmdRec.wait(t, 1)
+	if !strings.Contains(gotCmd[0], "仅推送 Telegram") {
+		t.Fatalf("create reply missing platform note: %#v", gotCmd)
+	}
+	say(svc, cmdRec, "/task list")
+	gotCmd = cmdRec.wait(t, 2)
+	if !strings.Contains(gotCmd[1], "#1 [仅 TG] 每天 09:00：看新闻") {
+		t.Fatalf("list missing [仅 TG]: %#v", gotCmd)
+	}
+
+	// Scheduled run delivers ONLY to Telegram.
+	svc.Now = func() time.Time { return time.Date(2026, 10, 19, 9, 0, 0, 0, taskZone) }
+	if err := svc.RunTaskByID(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	tgMsgs := tgSent.wait(t, 1)
+	if !strings.Contains(tgMsgs[0], "今天的新闻") {
+		t.Fatalf("TG did not receive task: %#v", tgMsgs)
+	}
+	dcRec.mu.Lock()
+	dcCount := len(dcRec.msgs)
+	dcRec.mu.Unlock()
+	if dcCount != 0 {
+		t.Fatalf("Discord should not receive TG-only task, got %#v", dcRec.msgs)
+	}
+
+	// 2. Switch task #1 to Discord-only via `/task platform 1 dc`.
+	say(svc, cmdRec, "/task platform 1 dc")
+	gotCmd = cmdRec.wait(t, 3)
+	if !strings.Contains(gotCmd[2], "仅推送 Discord") {
+		t.Fatalf("platform dc reply: %#v", gotCmd)
+	}
+	svc.Now = func() time.Time { return time.Date(2026, 10, 20, 9, 0, 0, 0, taskZone) }
+	if err := svc.RunTaskByID(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	dcMsgs := dcRec.wait(t, 1)
+	if !strings.Contains(dcMsgs[0], "今天的新闻") {
+		t.Fatalf("Discord did not receive DC-only task: %#v", dcMsgs)
+	}
+	tgSent.mu.Lock()
+	tgCount := len(tgSent.msgs)
+	tgSent.mu.Unlock()
+	if tgCount != 1 {
+		t.Fatalf("TG should not receive DC-only task, got %d messages", tgCount)
+	}
+
+	// Manual `/task run 1` from Telegram delivers to Discord and confirms in Telegram.
+	say(svc, cmdRec, "/task run 1")
+	gotCmd = cmdRec.wait(t, 4)
+	if !strings.Contains(gotCmd[3], "仅推送至 Discord") {
+		t.Fatalf("cross-platform trial reply: %#v", gotCmd)
+	}
+	dcRec.wait(t, 2)
+
+	// 3. Reset to all platforms via `/task platform 1 all`.
+	say(svc, cmdRec, "/task platform 1 all")
+	gotCmd = cmdRec.wait(t, 5)
+	if !strings.Contains(gotCmd[4], "全平台推送") {
+		t.Fatalf("platform all reply: %#v", gotCmd)
+	}
+	svc.Now = func() time.Time { return time.Date(2026, 10, 21, 9, 0, 0, 0, taskZone) }
+	if err := svc.RunTaskByID(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	tgSent.wait(t, 2)
+	dcRec.wait(t, 3)
+
+	// 4. `/task cron -p tg` creates a Telegram-only cron task.
+	say(svc, cmdRec, "/task cron -p tg 30 9 1 * * 汇总上月账单")
+	gotCmd = cmdRec.wait(t, 6)
+	if !strings.Contains(gotCmd[5], "已创建 #2") || !strings.Contains(gotCmd[5], "仅推送 Telegram") {
+		t.Fatalf("cron -p tg reply: %#v", gotCmd)
+	}
+	t2, ok, err := svc.Store.TaskByID(ctx, 2)
+	if err != nil || !ok || t2.TargetPlatform != platform.Telegram {
+		t.Fatalf("task #2 target_platform: %#v ok=%v err=%v", t2, ok, err)
+	}
+}
+
+func TestTaskNoReplySuppressesScheduledPush(t *testing.T) {
+	ctx := context.Background()
+	svc, engine, tgSent := taskService(t, dailyNews)
+	dcRec := &recorder{}
+	svc.AllowedUsers[platform.Discord] = map[string]struct{}{"dc_u1": {}}
+	svc.Senders[platform.Discord] = &fakeDiscordSender{rec: dcRec}
+
+	var sawScheduledFlag bool
+	replyText := "  [[NO_REPLY]]\n"
+	engine.replyFor = func(opts grok.ReplyOptions) (grok.HeadlessResult, error) {
+		if opts.JSONSchema != "" {
+			return grok.HeadlessResult{
+				SessionID:  opts.SessionID,
+				Structured: json.RawMessage(`{"action":"run","task_id":1}`),
+			}, nil
+		}
+		sawScheduledFlag = opts.ScheduledTask
+		return grok.HeadlessResult{Text: replyText, SessionID: opts.SessionID}, nil
+	}
+
+	addTask(t, svc, "9", dailyNews, "每天 03:00：交易日检查并显示T-1的fills文件", time.Date(2026, 10, 19, 9, 0, 0, 0, taskZone))
+
+	// 1. Scheduled RunTaskByID with [[NO_REPLY]] advances NextRun and suppresses push on ALL platforms.
+	svc.Now = func() time.Time { return time.Date(2026, 10, 19, 9, 0, 0, 0, taskZone) }
+	if err := svc.RunTaskByID(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if !sawScheduledFlag {
+		t.Fatal("expected ScheduledTask=true on Grok ReplyOptions")
+	}
+	tgSent.mu.Lock()
+	tgCount := len(tgSent.msgs)
+	tgSent.mu.Unlock()
+	dcRec.mu.Lock()
+	dcCount := len(dcRec.msgs)
+	dcRec.mu.Unlock()
+	if tgCount != 0 || dcCount != 0 {
+		t.Fatalf("expected 0 pushes on [[NO_REPLY]], got tg=%d dc=%d", tgCount, dcCount)
+	}
+	t1, _, _ := svc.Store.TaskByID(ctx, 1)
+	if !t1.NextRun.Equal(time.Date(2026, 10, 20, 9, 0, 0, 0, taskZone)) {
+		t.Fatalf("NextRun did not advance: %v", t1.NextRun)
+	}
+
+	// 2. Manual `/task run 1` confirms no-output locally without mirroring or showing raw [[NO_REPLY]].
+	cmdRec := &recorder{}
+	say(svc, cmdRec, "/task run 1")
+	gotCmd := cmdRec.wait(t, 1)
+	if strings.Contains(gotCmd[0], noReply) || !strings.Contains(gotCmd[0], "无结果产出") {
+		t.Fatalf("unexpected manual trial reply: %q", gotCmd[0])
+	}
+	dcRec.mu.Lock()
+	dcAfterTrial := len(dcRec.msgs)
+	dcRec.mu.Unlock()
+	if dcAfterTrial != 0 {
+		t.Fatalf("manual trial with [[NO_REPLY]] leaked to Discord: %#v", dcRec.msgs)
+	}
+
+	// 3. Next day when real output is produced, both platforms receive the push.
+	replyText = "T-1 共 12 笔成交"
+	svc.Now = func() time.Time { return time.Date(2026, 10, 20, 9, 0, 0, 0, taskZone) }
+	if err := svc.RunTaskByID(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	gotTG := tgSent.wait(t, 1)
+	gotDC := dcRec.wait(t, 1)
+	if !strings.Contains(gotTG[0], "T-1 共 12 笔成交") || !strings.Contains(gotDC[0], "T-1 共 12 笔成交") {
+		t.Fatalf("real output not delivered: tg=%#v dc=%#v", gotTG, gotDC)
+	}
+}

@@ -300,6 +300,68 @@ func TestGlobalMemoriesAndDeleteTaskByID(t *testing.T) {
 	}
 }
 
+func TestTaskTargetPlatformMigrateAndUpdate(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	old, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "bot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = old.Exec(`
+		CREATE TABLE tasks (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			platform TEXT NOT NULL,
+			chat_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			spec TEXT NOT NULL,
+			prompt TEXT NOT NULL,
+			summary TEXT NOT NULL,
+			next_run TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);
+		INSERT INTO tasks VALUES (1, 'telegram', '9', '1', '{"kind":"daily"}', 'p', 's', '2026-10-19T01:00:00Z', '2026-10-18T00:00:00Z');
+	`)
+	old.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(dir, "grok-4.7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+
+	legacy, ok, err := s.TaskByID(ctx, 1)
+	if err != nil || !ok || legacy.TargetPlatform != "" {
+		t.Fatalf("legacy task after migrate: %#v ok=%v err=%v", legacy, ok, err)
+	}
+
+	id2, err := s.AddTask(ctx, Task{
+		Platform: "telegram", ChatID: "9", UserID: "1",
+		Spec: `{"kind":"daily"}`, Prompt: "p2", Summary: "s2",
+		NextRun: time.Now(), TargetPlatform: "discord",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t2, ok, err := s.TaskByID(ctx, id2)
+	if err != nil || !ok || t2.TargetPlatform != "discord" {
+		t.Fatalf("new task target_platform: %#v ok=%v err=%v", t2, ok, err)
+	}
+
+	if updated, err := s.SetTaskTargetPlatform(ctx, id2, ""); err != nil || !updated {
+		t.Fatalf("SetTaskTargetPlatform clear: %v %v", updated, err)
+	}
+	t2, _, _ = s.TaskByID(ctx, id2)
+	if t2.TargetPlatform != "" {
+		t.Fatalf("expected cleared target_platform, got %q", t2.TargetPlatform)
+	}
+}
+
 func openTest(t *testing.T) *Store {
 	t.Helper()
 	s, err := Open(filepath.Join(t.TempDir(), "data"), "grok-4.7")

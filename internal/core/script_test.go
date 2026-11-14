@@ -156,3 +156,38 @@ func TestScriptTaskRejectsPathOutsideScriptDirs(t *testing.T) {
 		t.Fatalf("task created: %#v", all)
 	}
 }
+
+func TestScriptTaskSinglePlatformEnvAndFailureAlert(t *testing.T) {
+	requirePython(t)
+	svc, _, tgSent := taskService(t, dailyNews)
+	dcRec := &recorder{}
+	svc.AllowedUsers["discord"] = map[string]struct{}{"dc_u1": {}}
+	svc.Senders["discord"] = &fakeDiscordSender{rec: dcRec}
+
+	dir := t.TempDir()
+	svc.ScriptDirs = []string{dir}
+	svc.ScriptLogDir = filepath.Join(t.TempDir(), "task-logs")
+	script := writeScript(t, dir, "plat.py", "import os\nprint('plat=' + str(os.environ.get('GROK_BOT_TASK_PLATFORM')))\nraise SystemExit(2)\n")
+
+	rec := &recorder{}
+	say(svc, rec, "/task script -p dc 0 9 * * * "+script+" 仅DC脚本检查")
+	got := rec.wait(t, 1)
+	if !strings.Contains(got[0], "仅推送 Discord") {
+		t.Fatalf("create reply: %#v", got)
+	}
+
+	svc.Now = func() time.Time { return time.Date(2026, 10, 19, 9, 0, 0, 0, taskZone) }
+	if err := svc.RunTaskByID(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	dcAlert := dcRec.wait(t, 1)
+	if !strings.Contains(dcAlert[0], "plat=discord") || !strings.Contains(dcAlert[0], "退出码 2") {
+		t.Fatalf("discord alert: %#v", dcAlert)
+	}
+	tgSent.mu.Lock()
+	tgCount := len(tgSent.msgs)
+	tgSent.mu.Unlock()
+	if tgCount != 0 {
+		t.Fatalf("TG should not receive DC-only script alert, got %#v", tgSent.msgs)
+	}
+}

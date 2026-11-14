@@ -166,6 +166,14 @@ func TestDecode(t *testing.T) {
 	if err != nil || got.Kind != "dates" || got.Time != "09:00" || got.DateFile != "/srv/dates.txt" {
 		t.Fatalf("date_file decode: %#v %v", got, err)
 	}
+	got, err = Decode(json.RawMessage(`{"action":"create","kind":"daily","time":"09:00","prompt":"p","summary":"s","target_platform":"tg"}`), "")
+	if err != nil || got.TargetPlatform != "telegram" {
+		t.Fatalf("target_platform decode: %#v %v", got, err)
+	}
+	got, err = Decode(json.RawMessage(`{"action":"update","task_id":1,"target_platform":"全部"}`), "")
+	if err != nil || got.Action != "update" || got.TargetPlatform != "all" {
+		t.Fatalf("target_platform update decode: %#v %v", got, err)
+	}
 }
 
 func TestPromptContainsNowAndZone(t *testing.T) {
